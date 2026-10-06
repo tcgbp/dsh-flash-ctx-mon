@@ -22,13 +22,21 @@ export const Config = Schema.object({
     ctxThresholdError: Schema.number().default(DEFAULT_CTX_THRESHOLD_ERROR).volatile(),
     ctxPollBase: Schema.number().default(DEFAULT_CTX_POLL_BASE).volatile(),
     ctxPollMin: Schema.number().default(DEFAULT_CTX_POLL_MIN).volatile(),
-    // NOT volatile: user overrides and their provenance must survive restarts.
-    // When volatile, the source map is lost on restart and request/context events
-    // overwrite the user's manual setting (the priority guard depends on
-    // modelContextWindowSources recording 'user-mapping', but it's gone after a
-    // restart — so the guard passes and the adapter value clobbers the override).
-    modelContextWindows: Schema.dict(Schema.number()).default({}),
-    modelContextWindowSources: Schema.dict(Schema.string()).default({}),
+    // These MUST be volatile, even though they are durable user data rather than
+    // live scalars. The settings service only accepts edits to fields under a
+    // volatile node — `settings.write()` rejects any patched path that is not:
+    //
+    //   throw new Error(`Config field "${path.join('.')}" is not volatile`)
+    //
+    // Both fields used to be non-volatile, so every model-window mapping the
+    // panel wrote was rejected by the host, rolled back by the client, and lost —
+    // which is why a mapped model kept falling back to `ctxApproxWindow`.
+    // Volatile does NOT mean transient here: the write lands in the profile
+    // patch like every other edited field (the patch already carries the
+    // volatile `ctxApproxWindow`), so the mapping and its provenance survive a
+    // restart, which is what the priority guard in the client needs.
+    modelContextWindows: Schema.dict(Schema.number()).default({}).volatile(),
+    modelContextWindowSources: Schema.dict(Schema.string()).default({}).volatile(),
 });
 // ── apply() ─────────────────────────────────────────────────────────────
 export function apply(ctx, config) {
