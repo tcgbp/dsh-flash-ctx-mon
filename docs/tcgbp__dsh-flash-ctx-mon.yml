@@ -1,0 +1,55 @@
+# dsh-market submission entry for dsh-flash-ctx-mon.
+#
+# To submit: copy this file to
+#   <your-fork-of-awesome-dsh-plugin>/data/plugins/tcgbp__dsh-flash-ctx-mon.yml
+# and open a PR against https://github.com/awesome-dsh-plugin/awesome-dsh-plugin.
+# After it is merged, update it here rather than in a second place.
+#
+# Rules enforced by the registry's own scripts/lib/entries.mjs::validateEntries
+# (read from the registry on 2026-10-06) and by contributing.md:
+#   - only these keys: url, name, category, description, tarball
+#     (no `npm:` key — the npm mapping is resolved from the repository)
+#   - filename must equal slugFor(url): <owner>__<repo>.yml
+#   - `name` is the link text, so an owner/repo name must match `url`
+#   - category must be one of the registry's CAT_IDS
+#   - description.en is required and single-line; description.zh is optional
+#   - a description containing ": " must be quoted, or YAML parses it as a
+#     nested mapping key
+#   - tarball must be https on GitHub release hosting and end in .tgz/.tar.gz
+#
+# Category: `usage`. The plugin's whole subject is how much of the model's context
+# window a session has consumed — it reads token usage and reports it. `notify` is
+# the near miss (it delivers through dock-flash's alert registry), and the registry
+# treats a near-miss category as maintenance rather than a rejection.
+# CAT_IDS seen 2026-10-06: agi, ui, usage, theme, model, identity, session, memory,
+# tools, wsl, browser, vision, voice, docs, skill, workflow, git, notify, dev,
+# security, remote, market, fun.
+#
+# The tarball is deliberately the version-free releases/latest/download/ URL with a
+# version-free asset name. `latest` is resolved per request but the filename is taken
+# literally, so an asset named dsh-flash-ctx-mon-<version>.tgz would 404 on the next
+# release: keep the asset named dsh-flash-ctx-mon.tgz and publishing a new Release
+# moves this URL by itself, with no entry edit and no pull request per release.
+#
+# It is also the FALLBACK. Measured 2026-10: dsh-market's installTargetFor() resolves
+# the catalog's npm name FIRST (entry.npm), then this Release tarball, then
+# `github:<owner>/<repo>`. The registry resolves that npm mapping from the PUBLISHED
+# package's own `repository` field, which this package now declares.
+#
+# Submission state, checked 2026-10-06:
+#   * The GitHub mirror exists (tcgbp/dsh-flash-ctx-mon), public, default branch master,
+#     and carries the required `dsh-plugin` topic.
+#   * A Release exists whose asset name matches the URL below, so the entry's own link
+#     resolves; the URL is version-free, so later Releases keep it correct.
+#   * The registry's repo-age gate wants a repository at least 1 day old. This mirror was
+#     created 2026-10-06, so a PR opened immediately may be rejected on age — the gate
+#     re-runs itself every 6 hours, and such a PR turns green on its own.
+#   * The npm package `dsh-flash-ctx-mon` is published, so the catalog's npm mapping can
+#     resolve and users get the registry spec rather than this tarball.
+url: https://github.com/tcgbp/dsh-flash-ctx-mon
+name: tcgbp/dsh-flash-ctx-mon
+category: usage
+description:
+  en: 'Context monitor for dock-flash: registers a context-alert provider through the dockFlashAlerts service and its own switch through quickControl, reads precise token usage from DSH session events, and raises info, warning and error alerts as the model context window fills, with a configurable model-window map, adaptive polling, its own settings namespace and a session skills chip in the conversation header.'
+  zh: 'dock-flash 的上下文监控插件：通过 dockFlashAlerts 注册上下文告警提供者、通过 quickControl 注册自己的开关，从 DSH 会话事件读取精确 token 用量，在模型上下文窗口逐渐填满时给出信息/警告/错误三级告警；支持可配置的模型窗口映射、自适应轮询、独立的设置命名空间，并在会话标题栏提供技能芯片。'
+tarball: https://github.com/tcgbp/dsh-flash-ctx-mon/releases/latest/download/dsh-flash-ctx-mon.tgz

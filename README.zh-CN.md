@@ -162,8 +162,10 @@ Apache-2.0
 ## 安装
 
 ```sh
-dsh plugin --profile <profile> add <path-to-this-checkout>
+dsh plugin --profile <profile> add dsh-flash-ctx-mon
 ```
+
+需要 **dock-flash ≥ 1.5**：它提供 `quickControl`、`dockFlashAlerts` 服务与 `dock-flash:ready` 事件，任何 2.x 都满足。安装后请重启 DSH。
 
 `cordis.patch.yml` 负责插入宿主行。它的 `name` 是**包名**，经 profile 的 `node_modules`
 解析 —— **绝不是相对路径**。
