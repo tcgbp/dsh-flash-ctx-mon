@@ -1,6 +1,6 @@
 {
   "name": "dsh-flash-ctx-mon",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Context monitor provider for dock-flash — registers a context-alert provider (session token usage estimation) via ctx.get('dockFlashAlerts') and tracks context window pressure through DSH session events.",
   "license": "Apache-2.0",
   "type": "module",
