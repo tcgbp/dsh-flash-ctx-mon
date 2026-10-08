@@ -50,6 +50,6 @@ url: https://github.com/tcgbp/dsh-flash-ctx-mon
 name: tcgbp/dsh-flash-ctx-mon
 category: usage
 description:
-  en: 'Context monitor for dock-flash: registers a context-alert provider through the dockFlashAlerts service and its own switch through quickControl, reads precise token usage from DSH session events, and raises info, warning and error alerts as the model context window fills, with a configurable model-window map, adaptive polling, its own settings namespace and a session skills chip in the conversation header.'
-  zh: 'dock-flash 的上下文监控插件：通过 dockFlashAlerts 注册上下文告警提供者、通过 quickControl 注册自己的开关，从 DSH 会话事件读取精确 token 用量，在模型上下文窗口逐渐填满时给出信息/警告/错误三级告警；支持可配置的模型窗口映射、自适应轮询、独立的设置命名空间，并在会话标题栏提供技能芯片。'
+  en: 'Context monitor for dsh-flash: registers a context-alert provider through the dockFlashAlerts service and its own switch through quickControl, reads precise token usage from DSH session events, and raises info, warning and error alerts as the model context window fills, with a configurable model-window map, adaptive polling, its own settings namespace and a session skills chip in the conversation header.'
+  zh: 'dsh-flash 核心的上下文监控插件：通过 dockFlashAlerts 注册上下文告警提供者、通过 quickControl 注册自己的开关，从 DSH 会话事件读取精确 token 用量，在模型上下文窗口逐渐填满时给出信息/警告/错误三级告警；支持可配置的模型窗口映射、自适应轮询、独立的设置命名空间，并在会话标题栏提供技能芯片。'
 tarball: https://github.com/tcgbp/dsh-flash-ctx-mon/releases/latest/download/dsh-flash-ctx-mon.tgz

@@ -1,8 +1,8 @@
 # dsh-flash-ctx-mon
 
-> The **context monitor** companion plugin for
-> [dock-flash](https://gitee.com/lenin.guo/dock-flash) — it registers its own alert
-> provider and its own panel switch instead of living inside dock-flash's `apply()`.
+> The **context monitor** companion plugin for the core
+> [`dsh-flash`](https://github.com/tcgbp/dsh-flash) package — it registers its own alert
+> provider and its own panel switch instead of living inside the core's `apply()`.
 
 Apache-2.0
 
@@ -14,7 +14,7 @@ Two capabilities, one in each half of the plugin:
 
 1. **Context monitor** — reads the **precise** token usage DSH already reports on its
    session event stream and turns pressure on the model's context window into
-   dock-flash alerts, at three rising thresholds.
+   `dsh-flash` alerts, at three rising thresholds.
 2. **Session skills chip** — a chip in the conversation header listing the skills the
    current session has actually loaded, resolved against the skill catalog.
 
@@ -50,20 +50,20 @@ all of it in the browser.
 
 Switch properties: `type: 'toggle'`, `group: 'system'`, `cluster: 'system-alerts'`,
 `order: 59`, `icon: 'message'`, plus a **Configure** button. Its visibility follows
-dock-flash's `dock-flash:system-alerts` master toggle — with the alert registry switched
+`dsh-flash`'s `dock-flash:system-alerts` master toggle — with the alert registry switched
 off there is nothing for this switch to drive. It deliberately carries **no `subtitle`**:
 the live "model · 12%" readout it used to print on the row is already the first thing in
 the panel the Configure button opens.
 
 > **Dual discovery, plus a fallback poll.** `ctx.get('quickControl')` /
 > `ctx.get('dockFlashAlerts')` resolve asynchronously, so registration has three routes:
-> the `dock-flash:ready` event (dock-flash loaded after us), a synchronous `ctx.get()`
+> the `dock-flash:ready` event (`dsh-flash` loaded after us), a synchronous `ctx.get()`
 > check (it loaded before us), and a fallback poll of up to 15 attempts 200 ms apart.
 > The first to succeed sets `_registered`, so nothing registers twice.
 
 ## The switch
 
-In dock-flash's quick panel, under **⚙️ System → System Alerts**, find **Context
+In `dsh-flash`'s quick panel, under **⚙️ System → System Alerts**, find **Context
 Monitor**:
 
 - turning it **off** writes `'0'` to `localStorage['dsh-flash-ctx-mon:monitor-context']`
@@ -107,7 +107,7 @@ counts.
 | 🔴 error | ≥ `ctxThresholdError` (95 %) | Session context almost exhausted |
 
 Each message carries the percentage and the reading it came from — `model ·
-12.4K/128K` in precise mode. Alerts are `dismissible` and flow through dock-flash's
+12.4K/128K` in precise mode. Alerts are `dismissible` and flow through `dsh-flash`'s
 registry, so they appear in the panel's alert list and as toasts like any other.
 
 ## How a model's window is resolved
@@ -172,15 +172,14 @@ with the context monitor switched off.
 | Package | Type | Purpose |
 | --- | --- | --- |
 | `@deepseek-ai/cordis` | peer | the plugin framework |
-| `dock-flash` `>=1.5.0-0 <2.0.0-0 \|\| >=2.0.0-0 <3.0.0-0` | peer | supplies the `quickControl` and `dockFlashAlerts` services and the `dock-flash:ready` event |
+| `dsh-flash` `>=1.0.0-0 <2.0.0-0` | peer | supplies the `quickControl` and `dockFlashAlerts` services and the `dock-flash:ready` event |
 | `dock-base` `>=0.1.2-0 <1.0.0-0 \|\| >=0.2.0-0 <1.0.0-0` | peer, optional | workbench mode only |
 | `@deepseek-ai/schemastery` | dependency | the settings schema (`volatile()`) |
 
-There is **no hard dependency** on dock-flash: every service is resolved through
-`ctx.get(...)`, and compatibility is declared by the **peer range** — the same shape
-dock-flash itself uses towards dock-base. The range carries one branch per tuple whose
-prereleases must resolve, so both the 1.x and 2.x lines are accepted, prereleases
-included.
+There is **no hard dependency** on the core `dsh-flash`: every service is resolved through
+`ctx.get(...)`, and compatibility is declared by the **peer range** — the same shape the
+`dock-flash` v3 adapter uses towards dock-base. The range `>=1.0.0-0 <2.0.0-0` covers the 1.x
+line, prereleases included.
 
 ## Install
 
@@ -188,8 +187,8 @@ included.
 dsh plugin --profile <profile> add dsh-flash-ctx-mon
 ```
 
-Requires **dock-flash ≥ 1.5** — it supplies the `quickControl` and
-`dockFlashAlerts` services and the `dock-flash:ready` event, and any 2.x satisfies it.
+Requires **`dsh-flash` ≥ 1.0** — it supplies the `quickControl` and
+`dockFlashAlerts` services and the `dock-flash:ready` event, and the 1.x line satisfies it.
 Restart DSH after installing.
 
 `cordis.patch.yml` inserts the host row. Its `name` is a **package name**, resolved
@@ -208,7 +207,7 @@ pnpm run typecheck
 node scripts/verify-config-volatile.mjs ./dist/index.js
 ```
 
-`dist/index.js` is **tracked on purpose**, for the same reason dock-flash tracks its own:
+`dist/index.js` is **tracked on purpose**, for the same reason `dsh-flash` tracks its own:
 a git install fetches sources and runs no build script, so a repository without `dist/`
 would arrive missing the host entry point that `main` and `exports["."]` point at.
 `lib/client.js` is a single file edited directly; it has no build step and takes effect

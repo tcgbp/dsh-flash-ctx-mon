@@ -14,9 +14,9 @@ importers:
       dock-base:
         specifier: '>=0.1.2-0 <1.0.0-0 || >=0.2.0-0 <1.0.0-0'
         version: 0.2.4(cordis@4.0.0-rc.10)
-      dock-flash:
-        specifier: '>=1.5.0-0 <2.0.0-0'
-        version: 1.5.2(@deepseek-ai/cordis@4.0.4)(dock-base@0.2.4(cordis@4.0.0-rc.10))
+      dsh-flash:
+        specifier: '>=1.0.0-0 <2.0.0-0'
+        version: 1.0.0(@deepseek-ai/cordis@4.0.4)
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: ^4.0.4
@@ -223,14 +223,10 @@ packages:
       react-dom:
         optional: true
 
-  dock-flash@1.5.2:
-    resolution: {integrity: sha512-u8gZ2ER8nLVT7+oU6Xpsyi7FxOFfmx0xSO+NiDUbRXKVtL1viUvi9ruMFRFWlKK+giLX81l+GwwYbp4ZRuOItw==}
+  dsh-flash@1.0.0:
+    resolution: {integrity: sha512-R7KAaN/m7DXNUgvo4icatyUN+n/IKg2viQJzL/DLzO8sGb0NheafEJEnhcqiYpfbqGYmj1GiK5CiI6kM0wKnNw==}
     peerDependencies:
       '@deepseek-ai/cordis': '>=4.0.0-rc.1 <5.0.0-0 || >=4.0.1-0 <5.0.0-0'
-      dock-base: '>=0.1.2-0 <1.0.0-0 || >=0.2.0-0 <1.0.0-0'
-    peerDependenciesMeta:
-      dock-base:
-        optional: true
 
   fast-deep-equal@3.1.3:
     resolution: {integrity: sha512-f3qQ9oQy9j2AhBe/H9VC91wLmKBCCU/gDOnKNAYG5hswO7BLKj09Hc5HYNz9cGI++xlpDCIgDaitVs03ATR84Q==}
@@ -525,12 +521,10 @@ snapshots:
     dependencies:
       cordis: 4.0.0-rc.10
 
-  dock-flash@1.5.2(@deepseek-ai/cordis@4.0.4)(dock-base@0.2.4(cordis@4.0.0-rc.10)):
+  dsh-flash@1.0.0(@deepseek-ai/cordis@4.0.4):
     dependencies:
       '@deepseek-ai/cordis': 4.0.4(@deepseek-ai/cordis-plugin-include@1.0.9)(@deepseek-ai/cordis-plugin-loader@1.0.5)
       '@deepseek-ai/schemastery': 3.18.4
-    optionalDependencies:
-      dock-base: 0.2.4(cordis@4.0.0-rc.10)
 
   fast-deep-equal@3.1.3: {}
 

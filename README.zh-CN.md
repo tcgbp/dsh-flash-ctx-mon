@@ -1,7 +1,7 @@
 # dsh-flash-ctx-mon
 
-> [dock-flash](https://gitee.com/lenin.guo/dock-flash) 的**上下文监控**配套插件 —— 它自己注册
-> 告警提供者与面板开关，而不是住在 dock-flash 的 `apply()` 里。
+> 核心 [`dsh-flash`](https://github.com/tcgbp/dsh-flash) 的**上下文监控**配套插件 —— 它自己注册
+> 告警提供者与面板开关，而不是住在核心的 `apply()` 里。
 
 Apache-2.0
 
@@ -12,7 +12,7 @@ Apache-2.0
 两个能力，分别落在插件的两半：
 
 1. **上下文监控** —— 直接读取 DSH 会话事件流里已有的**精确** token 用量，把模型上下文窗口的
-   压力按三档递进的阈值变成 dock-flash 告警。
+   压力按三档递进的阈值变成 `dsh-flash` 告警。
 2. **会话技能芯片** —— 会话标题栏上的一枚芯片，列出**当前会话**真正加载过的技能，并用技能
    目录补全信息。
 
@@ -44,19 +44,19 @@ Apache-2.0
 | 会话标题芯片 `dsh-flash-ctx-mon-skills` | `ctx.inject(['slots'])` → `conversation.session.header.actions` |
 
 开关属性：`type: 'toggle'`、`group: 'system'`、`cluster: 'system-alerts'`、`order: 59`、
-`icon: 'message'`，外加一个**配置**按钮。它的可见性跟随 dock-flash 的
+`icon: 'message'`，外加一个**配置**按钮。它的可见性跟随 `dsh-flash` 的
 `dock-flash:system-alerts` 总开关 —— 告警注册表关掉之后，这个开关没有东西可驱动。它故意
 **不带 `subtitle`**：过去印在行上的 "模型 · 12%" 实时读数，现在就在「配置」按钮打开的
 面板第一屏。
 
 > **双路发现，外加兜底轮询。** `ctx.get('quickControl')` / `ctx.get('dockFlashAlerts')` 是
-> 异步解析的，所以注册有三条路径：`dock-flash:ready` 事件（dock-flash 比我们晚加载）、同步
+> 异步解析的，所以注册有三条路径：`dock-flash:ready` 事件（`dsh-flash` 比我们晚加载）、同步
 > `ctx.get()` 检查（它比我们早加载）、以及最多 15 次、每次间隔 200 ms 的兜底轮询。先成功
 > 的那个会置上 `_registered`，所以不会重复注册。
 
 ## 开关
 
-在 dock-flash 快捷面板的 **⚙️ 系统 → 系统告警** 下，找到 **上下文监控**：
+在 `dsh-flash` 快捷面板的 **⚙️ 系统 → 系统告警** 下，找到 **上下文监控**：
 
 - **关**：向 `localStorage['dsh-flash-ctx-mon:monitor-context']` 写入 `'0'`，并对告警注册表
   调用 `setProviderEnabled(…, false)`，提供者随之停止产出告警；
@@ -95,7 +95,7 @@ Apache-2.0
 | 🔴 错误 | ≥ `ctxThresholdError`（95 %） | 会话上下文几乎用尽 |
 
 每条消息都带上百分比与它所依据的读数 —— 精确模式下形如 `模型 · 12.4K/128K`。告警是
-`dismissible` 的，并且走 dock-flash 的注册表，所以它们和其它告警一样出现在面板告警列表与
+`dismissible` 的，并且走 `dsh-flash` 的注册表，所以它们和其它告警一样出现在面板告警列表与
 弹窗通知里。
 
 ## 模型窗口是怎么解析出来的
@@ -151,13 +151,13 @@ Apache-2.0
 | 包 | 类型 | 用途 |
 | --- | --- | --- |
 | `@deepseek-ai/cordis` | peer | 插件框架 |
-| `dock-flash` `>=1.5.0-0 <2.0.0-0 \|\| >=2.0.0-0 <3.0.0-0` | peer | 提供 `quickControl`、`dockFlashAlerts` 服务与 `dock-flash:ready` 事件 |
+| `dsh-flash` `>=1.0.0-0 <2.0.0-0` | peer | 提供 `quickControl`、`dockFlashAlerts` 服务与 `dock-flash:ready` 事件 |
 | `dock-base` `>=0.1.2-0 <1.0.0-0 \|\| >=0.2.0-0 <1.0.0-0` | peer，可选 | 仅 workbench 模式 |
 | `@deepseek-ai/schemastery` | dependency | 设置 schema（`volatile()`） |
 
-对 dock-flash **没有硬依赖**：所有服务都通过 `ctx.get(...)` 解析，兼容性由 **peer 范围**声明
-—— 与 dock-flash 自己对 dock-base 的写法同形。该范围按「预发布必须能解析的 tuple」逐条分支，
-因此 1.x 与 2.x 两条线都被接受，预发布版本也算在内。
+对核心 `dsh-flash` **没有硬依赖**：所有服务都通过 `ctx.get(...)` 解析，兼容性由 **peer 范围**声明
+—— 与 `dock-flash` v3 适配器对 dock-base 的写法同形。`>=1.0.0-0 <2.0.0-0` 覆盖的正是含预发布的
+1.x 线。
 
 ## 安装
 
@@ -165,7 +165,7 @@ Apache-2.0
 dsh plugin --profile <profile> add dsh-flash-ctx-mon
 ```
 
-需要 **dock-flash ≥ 1.5**：它提供 `quickControl`、`dockFlashAlerts` 服务与 `dock-flash:ready` 事件，任何 2.x 都满足。安装后请重启 DSH。
+需要 **`dsh-flash` ≥ 1.0**：它提供 `quickControl`、`dockFlashAlerts` 服务与 `dock-flash:ready` 事件，1.x 线都满足。安装后请重启 DSH。
 
 `cordis.patch.yml` 负责插入宿主行。它的 `name` 是**包名**，经 profile 的 `node_modules`
 解析 —— **绝不是相对路径**。
@@ -182,7 +182,7 @@ pnpm run typecheck
 node scripts/verify-config-volatile.mjs ./dist/index.js
 ```
 
-`dist/index.js` 是**有意纳入版本控制**的，理由与 dock-flash 相同：git 安装只取源码、不跑任何
+`dist/index.js` 是**有意纳入版本控制**的，理由与 `dsh-flash` 相同：git 安装只取源码、不跑任何
 构建脚本，所以没有 `dist/` 的仓库会缺少 `main` 与 `exports["."]` 指向的宿主入口。
 `lib/client.js` 是单文件直接编辑，无构建步骤，刷新页面即生效。
 
