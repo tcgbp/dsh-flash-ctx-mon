@@ -13,7 +13,7 @@ Apache-2.0
 
 1. **上下文监控** —— 直接读取 DSH 会话事件流里已有的**精确** token 用量，把模型上下文窗口的
    压力按三档递进的阈值变成 `dsh-flash` 告警。
-2. **会话技能芯片** —— 会话标题栏上的一枚芯片，列出**当前会话**真正加载过的技能，并用技能
+2. **会话技能芯片** —— 会话标签栏上的一枚芯片，列出**当前会话**真正加载过的技能，并用技能
    目录补全信息。
 
 监控**默认开启**（只有显式关闭才会关掉），并且**完全在客户端**。
@@ -41,7 +41,7 @@ Apache-2.0
 | --- | --- |
 | 告警提供者 `dsh-flash-ctx-mon:context-alert` | `ctx.get('dockFlashAlerts').registerProvider()` |
 | 面板开关 `dsh-flash-ctx-mon:monitor-context` | `ctx.get('quickControl').registerSwitch()` |
-| 会话标题芯片 `dsh-flash-ctx-mon-skills` | `ctx.inject(['slots'])` → `conversation.session.header.actions` |
+| 会话技能芯片 `dsh-flash-ctx-mon-skills` | `ctx.inject(['slots'])` → `conversation.session.header.actions`，实际渲染在会话标签栏上 |
 
 开关属性：`type: 'toggle'`、`group: 'system'`、`cluster: 'system-alerts'`、`order: 59`、
 `icon: 'message'`，外加一个**配置**按钮。它的可见性跟随 `dsh-flash` 的
@@ -122,8 +122,15 @@ Apache-2.0
 
 ## 技能芯片
 
-会话标题栏上的一枚芯片，以 `dsh-flash-ctx-mon-skills`（order 15）注册进
-`conversation.session.header.actions`。它列出**当前会话**加载过的技能 —— 子代理与其它会话被
+芯片画在会话的**标签栏**上，紧跟在最后一个会话标签之后。标签栏上没有会话 id ——
+`data-conversation-session` 只标在会话正文上 —— 所以保证「每会话各归其位」的正是标题栏那枚
+芯片：它仍以 `dsh-flash-ctx-mon-skills`（order 15）注册进
+`conversation.session.header.actions`，渲染一个携带 slot 交给它的会话 id 的隐藏锚点，从该锚点
+向上找到「恰好只含一个标签栏」的最近祖先，再把可见芯片挂到那里。若某个祖先里出现多于一个
+标签栏，说明牵涉到另一个会话，芯片就留在标题栏；只有一个会话视图的会话根本没有标签栏，芯片
+也会像以前一样留在标题栏。标签栏被重建、或又追加了标签时，由 `MutationObserver` 重新摆位。
+
+它列出**当前会话**加载过的技能 —— 子代理与其它会话被
 排除在外，因为 slot 会把「它正在为哪个会话渲染」的 id 交给组件。
 
 检测用的是 DSH 自己的标记：技能正文被加载时输出的 `<skill_content name="X">` 块。它从两条

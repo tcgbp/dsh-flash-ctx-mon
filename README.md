@@ -15,7 +15,7 @@ Two capabilities, one in each half of the plugin:
 1. **Context monitor** — reads the **precise** token usage DSH already reports on its
    session event stream and turns pressure on the model's context window into
    `dsh-flash` alerts, at three rising thresholds.
-2. **Session skills chip** — a chip in the conversation header listing the skills the
+2. **Session skills chip** — a chip beside the conversation tabs listing the skills the
    current session has actually loaded, resolved against the skill catalog.
 
 The monitor is **on by default** — only an explicit "off" turns it off — and it is
@@ -46,7 +46,7 @@ all of it in the browser.
 | --- | --- |
 | Alert provider `dsh-flash-ctx-mon:context-alert` | `ctx.get('dockFlashAlerts').registerProvider()` |
 | Panel switch `dsh-flash-ctx-mon:monitor-context` | `ctx.get('quickControl').registerSwitch()` |
-| Session header chip `dsh-flash-ctx-mon-skills` | `ctx.inject(['slots'])` → `conversation.session.header.actions` |
+| Session skills chip `dsh-flash-ctx-mon-skills` | `ctx.inject(['slots'])` → `conversation.session.header.actions`, rendered onto the session's tab strip |
 
 Switch properties: `type: 'toggle'`, `group: 'system'`, `cluster: 'system-alerts'`,
 `order: 59`, `icon: 'message'`, plus a **Configure** button. Its visibility follows
@@ -139,10 +139,19 @@ notice is claimed while the use is still fresh.
 
 ## The skills chip
 
-A chip in the conversation header, registered into `conversation.session.header.actions`
-as `dsh-flash-ctx-mon-skills` (order 15). It lists the skills **the current session** has
-loaded — subagents and other sessions are excluded, because the slot hands the component
-the id of the session it renders for.
+The chip is drawn on the session's **tab strip**, directly after the last conversation tab.
+DSH puts no session id on that strip — `data-conversation-session` marks the conversation
+body only — so the header chip is what keeps it per-session: it stays registered into
+`conversation.session.header.actions` as `dsh-flash-ctx-mon-skills` (order 15), renders a
+hidden anchor carrying the id the slot handed it, walks up from that anchor to the nearest
+ancestor holding exactly one strip, and mounts the visible chip there. An ancestor holding
+more than one strip means another session is involved, so the chip stays in the header; a
+session with a single conversation view has no strip at all, and the header chip remains
+where it always was. A `MutationObserver` re-places the chip when a strip is rebuilt or
+another tab appears.
+
+It lists the skills **the current session** has loaded — subagents and other sessions are
+excluded, because the slot hands the component the id of the session it renders for.
 
 Detection uses DSH's own marker: the `<skill_content name="X">` block emitted when a
 skill body is loaded. It arrives on two paths — the model calling the `skill` tool, and a
