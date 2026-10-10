@@ -40,7 +40,7 @@ arrives through DSH session events (`ctx.get('sessions')`), the model catalog th
 `remote.session.modelCatalog()`, and the skill catalog through `remote.skills.list()` —
 all of it in the browser.
 
-### Browser half — `lib/client.js` (no build step)
+### Browser half — `src-client/` → `lib/client.js` (esbuild bundle)
 
 | Registration | Through |
 | --- | --- |
@@ -211,7 +211,8 @@ The browser half needs no row: the module loader discovers it from `package.json
 
 ```sh
 pnpm install
-pnpm run build       # tsc → dist/index.js   (host half only)
+pnpm run build       # tsc → dist/index.js  +  esbuild → lib/client.js
+pnpm test            # Vitest unit tests for src-client pure logic
 pnpm run typecheck
 node scripts/verify-config-volatile.mjs ./dist/index.js
 ```
@@ -219,8 +220,21 @@ node scripts/verify-config-volatile.mjs ./dist/index.js
 `dist/index.js` is **tracked on purpose**, for the same reason `dsh-flash` tracks its own:
 a git install fetches sources and runs no build script, so a repository without `dist/`
 would arrive missing the host entry point that `main` and `exports["."]` point at.
-`lib/client.js` is a single file edited directly; it has no build step and takes effect
-on page refresh.
+
+`lib/client.js` is **also tracked on purpose** (the browser half ships pre-built): the module
+loader requires a single-file `window.__ModuleLoader__.load(...)` bundle, and the loader's
+`require` resolves `react`/`react-dom` at runtime, so those are kept external. Its source
+lives under `src-client/` and is bundled with esbuild:
+
+```sh
+pnpm run build:client   # src-client/index.js → lib/client.js
+```
+
+`build:client` is folded into `pnpm run build`. The pure logic (`tokens`, `skill-detect`) is
+split into `src-client/*.js` modules that are unit-tested with Vitest (`pnpm test`) and
+genuinely shared with the bundle; the stateful browser-half logic (prefs, token source,
+skill tracker, provider, i18n) intentionally stays inline in `factory-body.js` because it is
+coupled to that closure's private session-event state.
 
 `scripts/verify-config-volatile.mjs` loads the built host half and re-runs the settings
 service's own volatile-path test against it — the invariant the two map fields must
@@ -229,11 +243,15 @@ satisfy, or every write to them is rejected.
 ## Layout
 
 ```
-src/index.ts      HOST half      → tsc → dist/index.js
-lib/client.js     BROWSER half   → no build, edited directly
-dist/index.js     compiled host half — tracked on purpose
-cordis.patch.yml  bundle layer: inserts the host row into the profile
-scripts/          verify-config-volatile.mjs — the volatile-schema check
+src/index.ts        HOST half      → tsc → dist/index.js
+src-client/index.js BROWSER source entry → esbuild → lib/client.js
+src-client/*.js     pure logic modules (tokens, skill-detect) — unit-tested
+lib/client.js       compiled browser half — tracked on purpose
+dist/index.js       compiled host half — tracked on purpose
+test/               Vitest unit tests for the pure logic modules
+cordis.patch.yml    bundle layer: inserts the host row into the profile
+scripts/            build-client.mjs — the panel's esbuild bundle step
+scripts/            verify-config-volatile.mjs — the volatile-schema check
 .github/workflows/sync-from-gitee.yml — the Gitee → GitHub mirror
 ```
 

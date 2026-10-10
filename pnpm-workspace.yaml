@@ -3,3 +3,8 @@
 # Remove this file once the window has passed.
 minimumReleaseAgeExclude:
   - dsh-flash@1.0.0
+
+# Allow esbuild (and its platform binary packages) to run their install scripts.
+onlyBuiltDependencies:
+  - esbuild
+  - '@esbuild/win32-x64'
