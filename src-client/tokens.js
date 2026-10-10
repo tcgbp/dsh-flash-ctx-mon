@@ -5,33 +5,28 @@
 // settings-service dependency.
 
 /**
- * Format a token count as a human-readable "K" string.
+ * Format a token count as a human-readable binary-K string.
  *
- * LLM context windows are typically powers of two (131072 = 128K, 65536 = 64K,
- * 32768 = 32K) where the conventional "K" means ÷1024. Some models use round
- * thousands (e.g. DeepSeek 128K = 128000) where ÷1000 is more natural. This
- * function detects 2^n-aligned values and uses ÷1024; everything else falls
- * back to ÷1000.
+ * Context windows are conventionally powers of two expressed as KiB
+ * (131072 = 128K, 65536 = 64K, 32768 = 32K), so formatting always divides
+ * by 1024, regardless of whether the value is 2^n-aligned or a round
+ * thousand like 128000 (→ 125K). No special-casing between binary and
+ * decimal K — one rule, 1024-based.
  */
 export function formatTokenK(v) {
   if (v == null || !isFinite(v)) return '' + v
-  if (v < 1000) return '' + v
-  // If the value is an exact multiple of 1024 and >= 1024, it is almost
-  // certainly a power-of-two context window — use binary K.
-  if (v >= 1024 && (v & (v - 1)) === 0) return Math.round(v / 1024) + 'K'
-  // Otherwise (e.g. 128000, 200000) use decimal K for consistency with how
-  // the provider named the model ("128K" = 128000 tokens).
-  return Math.round(v / 1000) + 'K'
+  if (v < 1024) return '' + v
+  return Math.round(v / 1024) + 'K'
 }
 
 /**
- * Format a token count with one decimal place (e.g. "12.3K").
- * Used for live pressure/breakdown values that aren't exact 2^n.
+ * Format a token count with one decimal place as binary K (e.g. "133.8K").
+ * Used for live pressure/breakdown values that aren't exact 2^n; also 1024-based.
  */
 export function formatTokenK1(v) {
   if (v == null || !isFinite(v)) return '' + v
-  if (v < 1000) return '' + v
-  return (v / 1000).toFixed(1) + 'K'
+  if (v < 1024) return '' + v
+  return (v / 1024).toFixed(1) + 'K'
 }
 
 // ── Context window source tags ─────────────────────────────────────────────

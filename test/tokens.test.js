@@ -14,23 +14,23 @@ import {
 } from '../src-client/tokens.js'
 
 describe('formatTokenK', () => {
-  it('returns numbers below 1000 unchanged', () => {
+  it('returns numbers below 1024 unchanged', () => {
     expect(formatTokenK(0)).toBe('0')
     expect(formatTokenK(999)).toBe('999')
     expect(formatTokenK(512)).toBe('512')
   })
 
-  it('uses binary K for exact powers-of-two windows', () => {
+  it('uses binary (1024-base) K for powers-of-two windows', () => {
     expect(formatTokenK(131072)).toBe('128K')
     expect(formatTokenK(65536)).toBe('64K')
     expect(formatTokenK(32768)).toBe('32K')
     expect(formatTokenK(1024)).toBe('1K')
   })
 
-  it('uses decimal K for round-thousand approximations', () => {
-    expect(formatTokenK(128000)).toBe('128K')
-    expect(formatTokenK(1000)).toBe('1K')
-    expect(formatTokenK(200000)).toBe('200K')
+  it('is always 1024-based, even for round-thousand values', () => {
+    expect(formatTokenK(128000)).toBe('125K') // 128000 / 1024 ≈ 125
+    expect(formatTokenK(200000)).toBe('195K') // 200000 / 1024 ≈ 195.3
+    expect(formatTokenK(2048)).toBe('2K')
   })
 
   it('handles null / Infinity gracefully', () => {
@@ -40,14 +40,14 @@ describe('formatTokenK', () => {
   })
 })
 
-describe('formatTokenK1 (one decimal)', () => {
-  it('formats one-decimal K values', () => {
-    expect(formatTokenK1(12300)).toBe('12.3K')
-    expect(formatTokenK1(123456)).toBe('123.5K')
+describe('formatTokenK1 (one decimal, 1024-based)', () => {
+  it('formats one-decimal binary-K values', () => {
+    expect(formatTokenK1(140000)).toBe('136.7K') // 140000 / 1024 ≈ 136.72
+    expect(formatTokenK1(123456)).toBe('120.6K') // 123456 / 1024 ≈ 120.56
   })
 
   it('keeps sub-thousand values unchanged', () => {
-    expect(formatTokenK1(500)).toBe('500')
+    expect(formatTokenK1(1023)).toBe('1023')
   })
 })
 
