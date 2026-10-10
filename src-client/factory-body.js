@@ -100,6 +100,7 @@ window.__ModuleLoader__.load({
       ctxInputTokens: '输入Token',
       ctxPressureTokens: '上下文压力',
       ctxApproxWindowHint: '未知模型的默认窗口',
+      ctxExactWindow: '精确值',
       ctxSrcRequestContext: '会话事件',
       ctxSrcCatalogAuto: '模型目录',
       ctxSrcCatalogUnknown: '目录未知',
@@ -162,6 +163,7 @@ window.__ModuleLoader__.load({
       ctxInputTokens: 'Input Tokens',
       ctxPressureTokens: 'Context Pressure',
       ctxApproxWindowHint: 'Default for unknown models',
+      ctxExactWindow: 'Exact value',
       ctxSrcRequestContext: 'Session Event',
       ctxSrcCatalogAuto: 'Model Catalog',
       ctxSrcCatalogUnknown: 'Catalog (unknown)',
@@ -2419,7 +2421,7 @@ var _PREFS_MAX_RETRIES = 8
 
     var MONITOR_SLIDER_FIELDS = {
       context: [
-        { key: 'ctxApproxWindow',     labelKey: 'ctxApproxWindow',     hintKey: 'ctxApproxWindowHint', min: 64000, max: 512000, step: 8000, format: function (v) { return formatTokenK(v) } },
+        { key: 'ctxApproxWindow',     labelKey: 'ctxApproxWindow',     hintKey: 'ctxApproxWindowHint', min: 64000, max: 512000, step: 2048, exactInput: true, format: function (v) { return formatTokenK(v) } },
         { key: 'ctxThresholdInfo',    labelKey: 'ctxThresholdInfo',    tooltipKey: 'ctxThresholdInfoTip',    min: 30,    max: 80,     step: 1,    format: function (v) { return v + '%' } },
         { key: 'ctxThresholdWarning', labelKey: 'ctxThresholdWarning', tooltipKey: 'ctxThresholdWarningTip', min: 50,    max: 92,     step: 1,    format: function (v) { return v + '%' } },
         { key: 'ctxThresholdError',   labelKey: 'ctxThresholdError',   tooltipKey: 'ctxThresholdErrorTip',   min: 70,    max: 98,     step: 1,    format: function (v) { return v + '%' } },
@@ -2496,6 +2498,31 @@ var _PREFS_MAX_RETRIES = 8
         var hintEl = f.hintKey
           ? h('div', { style: S.paramHint }, t(f.hintKey))
           : null
+        // An exact number input for window sizes: the range track covers the
+        // coarse span, but a slider step cannot hit every common context window
+        // (e.g. 131072 = 128K vs 128000), so offer a precise numeric input that
+        // writes the exact token count.
+        var exactEl = null
+        if (f.exactInput) {
+          exactEl = h('div', { style: Object.assign({}, S.sliderRow, { marginTop: '2px', alignItems: 'center' }) },
+            h('span', { style: S.paramHint }, t('ctxExactWindow')),
+            h('input', {
+              type: 'number',
+              min: f.min, max: f.max, step: 1,
+              value: val,
+              style: Object.assign({}, S.slider, { flex: 'none', width: '120px', minWidth: '120px' }),
+              onChange: function (e) {
+                var next = Number(e.target.value)
+                if (!isFinite(next)) return
+                next = Math.round(next)
+                if (next < f.min) next = f.min
+                if (next > f.max) next = f.max
+                _writeAlertPref(_prefCtx, f.key, next, function (patch, rollback) { rollback() })
+                setTick(function (v) { return v + 1 })
+              },
+            }),
+          )
+        }
         return h('div', { key: f.key, style: S.paramCell },
           h('div', { style: S.paramLabel },
             h('span', { style: S.switchIcon }, '⚙'),
@@ -2516,6 +2543,7 @@ var _PREFS_MAX_RETRIES = 8
             }),
             h('span', { style: S.value }, f.format(val)),
           ),
+          exactEl,
         )
       }
 
