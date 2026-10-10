@@ -2419,7 +2419,7 @@ var _PREFS_MAX_RETRIES = 8
 
     var MONITOR_SLIDER_FIELDS = {
       context: [
-        { key: 'ctxApproxWindow',     labelKey: 'ctxApproxWindow',     hintKey: 'ctxApproxWindowHint', min: 32768, max: 524288, step: 1024, format: function (v) { return formatTokenK(v) } },
+        { key: 'ctxApproxWindow',     labelKey: 'ctxApproxWindow',     hintKey: 'ctxApproxWindowHint', min: 32768, max: 1048576, step: 32768, format: function (v) { return formatTokenK(v) } },
         { key: 'ctxThresholdInfo',    labelKey: 'ctxThresholdInfo',    tooltipKey: 'ctxThresholdInfoTip',    min: 30,    max: 80,     step: 1,    format: function (v) { return v + '%' } },
         { key: 'ctxThresholdWarning', labelKey: 'ctxThresholdWarning', tooltipKey: 'ctxThresholdWarningTip', min: 50,    max: 92,     step: 1,    format: function (v) { return v + '%' } },
         { key: 'ctxThresholdError',   labelKey: 'ctxThresholdError',   tooltipKey: 'ctxThresholdErrorTip',   min: 70,    max: 98,     step: 1,    format: function (v) { return v + '%' } },
