@@ -11,6 +11,29 @@ thresholds, and offers a **session skills chip** that lists the skills the curre
 session has actually loaded. It is client-side only; the host half exists just to
 hold the settings namespace and schema.
 
+## 0.2.0
+
+**The browser half gains a build step, and context windows are sized in binary K.**
+The half was one 3600-line editable `lib/client.js`; its source now lives in
+`src-client/` and is split into stateless, unit-tested modules (`tokens`,
+`skill-detect`, `ctx-window`) bundled with esbuild into the tracked
+`lib/client.js`. Stateful logic (prefs, token source, skill tracker, provider,
+i18n) intentionally stays inline in `factory-body.js`, coupled to the
+session-event closure. Bundling is the first behavior-visible change a version
+bump — from 0.1 to 0.2 — signals, because the built artifact is now a checked-in
+build product and every subsequent change to the source must regenerate it.
+
+Token/window formatting is now uniformly **1024-based**: `formatTokenK` /
+`formatTokenK1` always divide by 1024, so 131072 = 128K, 200000 = 195K — no more
+mixed binary/decimal K. The window-size slider's `min`/`max`/`step` were wrong
+(64,000 was 62.5×1024, step 8000 was 7.8125×1024) and are realigned to 1024
+multiples: range 32768..1M, step 32K, so an exact 128K (131072) is reachable.
+
+Pure window/error logic (`extractWindowFromError`, `isContextLimitError`,
+`resolveWindowFromMaps`) moved out of the closure into `src-client/ctx-window.js`
+with unit tests; `_resolveWindow` is now a thin wrapper. A 35-case Vitest suite
+covers the pure modules.
+
 ## 0.1.8
 
 **The session skills chip moves onto the tab strip.** The chip that listed a
