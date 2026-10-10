@@ -35,7 +35,7 @@ Apache-2.0
 本来就无可采集：token 用量来自 DSH 会话事件（`ctx.get('sessions')`），模型目录来自
 `remote.session.modelCatalog()`，技能目录来自 `remote.skills.list()` —— 全都在浏览器里。
 
-### 浏览器半 —— `lib/client.js`（无构建步骤）
+### 浏览器半 —— `src-client/` → `lib/client.js`（esbuild 打包）
 
 | 注册项 | 经由 |
 | --- | --- |
@@ -71,7 +71,7 @@ Apache-2.0
 
 | 控件 | 范围 | 步长 | 默认 |
 | --- | --- | --- | --- |
-| 上下文窗口大小 `ctxApproxWindow` | 64000–512000 token | 8000 | 128000 |
+| 上下文窗口大小 `ctxApproxWindow` | 32768–1048576 token | 32768 | 128000 |
 | 信息阈值 `ctxThresholdInfo` | 30–80 % | 1 | 70 |
 | 警告阈值 `ctxThresholdWarning` | 50–92 % | 1 | 85 |
 | 错误阈值 `ctxThresholdError` | 70–98 % | 1 | 95 |
@@ -184,14 +184,26 @@ dsh plugin --profile <profile> add dsh-flash-ctx-mon
 
 ```sh
 pnpm install
-pnpm run build       # tsc → dist/index.js   （仅宿主半）
+pnpm run build       # tsc → dist/index.js  +  esbuild → lib/client.js
+pnpm test            # Vitest：src-client 纯逻辑单元测试
 pnpm run typecheck
 node scripts/verify-config-volatile.mjs ./dist/index.js
 ```
 
 `dist/index.js` 是**有意纳入版本控制**的，理由与 `dsh-flash` 相同：git 安装只取源码、不跑任何
 构建脚本，所以没有 `dist/` 的仓库会缺少 `main` 与 `exports["."]` 指向的宿主入口。
-`lib/client.js` 是单文件直接编辑，无构建步骤，刷新页面即生效。
+`lib/client.js` 也**有意纳入版本控制**（浏览器半以预构建产物随附）：模块加载器要求一个单文件
+`window.__ModuleLoader__.load(...)` 产物，而加载器的 `require` 在运行时解析 `react`/`react-dom`，
+所以它们保持 external。它的源码在 `src-client/` 下，用 esbuild 打包：
+
+```sh
+pnpm run build:client   # src-client/index.js → lib/client.js
+```
+
+`build:client` 已并入 `pnpm run build`。纯逻辑（`tokens`、`skill-detect`、`ctx-window`）被拆分到
+`src-client/*.js` 模块，用 Vitest（`pnpm test`）做单元测试，并与产物真正共享；有状态的浏览器半
+逻辑（偏好、token 来源、技能追踪器、提供者、i18n）刻意留在 `factory-body.js` 内联，因为它们与
+该闭包的私有会话事件状态耦合。
 
 `scripts/verify-config-volatile.mjs` 会加载构建好的宿主半，并对它重跑设置服务自己的
 volatile 路径检查 —— 也就是那两个映射字段必须满足的不变量，不满足则每次写入都会被拒绝。
@@ -199,12 +211,16 @@ volatile 路径检查 —— 也就是那两个映射字段必须满足的不变
 ## 目录结构
 
 ```
-src/index.ts      HOST half      → tsc → dist/index.js
-lib/client.js     BROWSER half   → no build, edited directly
-dist/index.js     compiled host half — tracked on purpose
-cordis.patch.yml  bundle layer: inserts the host row into the profile
-scripts/          verify-config-volatile.mjs — the volatile-schema check
-.github/workflows/sync-from-gitee.yml — the Gitee → GitHub mirror
+src/index.ts          HOST half      → tsc → dist/index.js
+src-client/index.js   浏览器半源码入口 → esbuild → lib/client.js
+src-client/*.js       纯逻辑模块（tokens、skill-detect、ctx-window）—— 单元测试
+lib/client.js         compiled browser half — tracked on purpose
+dist/index.js         compiled host half — tracked on purpose
+test/                 Vitest：各纯逻辑模块的单元测试
+cordis.patch.yml      bundle layer: inserts the host row into the profile
+scripts/              build-client.mjs — 面板的 esbuild 打包步骤
+scripts/              verify-config-volatile.mjs — volatile-schema 检查
+.github/workflows/sync-from-gitee.yml — Gitee → GitHub 镜像
 ```
 
 Gitee 是权威仓库；GitHub（`github.com/tcgbp/dsh-flash-ctx-mon`）是它的镜像，也是发布用

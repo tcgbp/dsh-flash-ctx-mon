@@ -38,6 +38,7 @@ import {
   CWS_APPROX_DEFAULT,
 } from './tokens.js'
 import { SKILL_CONTENT_PREFIX, parseSkillBlock, findSkillBlock } from './skill-detect.js'
+import { extractWindowFromError, isContextLimitError, resolveWindowFromMaps } from './ctx-window.js'
 
 window.__ModuleLoader__.load({
   id: 'dsh-flash-ctx-mon',
@@ -594,20 +595,14 @@ var _PREFS_MAX_RETRIES = 8
     }
 
     function _resolveWindow(modelName) {
-      if (!modelName) return { window: null, source: CWS_APPROX_DEFAULT }
-      // 1. User-configured mapping (host pref) — includes error-extracted &
-      //    catalog-auto values that were persisted into modelContextWindows.
-      var custom = _alertPref('modelContextWindows')
-      if (custom && typeof custom === 'object' && custom[modelName]) {
-        // Check provenance — if this entry came from error extraction or catalog, label it
-        var sources = _alertPref('modelContextWindowSources')
-        var src = (sources && typeof sources === 'object' && sources[modelName])
-          ? sources[modelName]
-          : CWS_USER_MAPPING
-        return { window: custom[modelName], source: src }
-      }
-      // 2. Unknown model — return null (caller uses ctxApproxWindow as default)
-      return { window: null, source: CWS_APPROX_DEFAULT }
+      // Thin wrapper: the pure resolution rules live in resolveWindowFromMaps
+      // (src-client/ctx-window.js) so they can be unit-tested without the
+      // settings-service pref closure.
+      return resolveWindowFromMaps(
+        modelName,
+        _alertPref('modelContextWindows'),
+        _alertPref('modelContextWindowSources')
+      )
     }
 
     /** Extract the meaningful source tag from a (possibly compound) source.
@@ -715,33 +710,6 @@ var _PREFS_MAX_RETRIES = 8
       var _ctx = null       // Cordis context for preference writes (set in start)
       var _bindRetryTimer = null
       var _bindRetryCount = 0
-
-      /** Try to extract a token count from a context-window-exceeded error message.
-       *  Providers typically include phrasing like "maximum context length is 131072 tokens"
-       *  or "context window of 128000". Returns the number or null. */
-      function _extractWindowFromError(msg) {
-        if (typeof msg !== 'string') return null
-        // Pattern: "maximum context length is NNN" / "context length of NNN" / "context window of NNN"
-        var m = msg.match(/(?:maximum|max(?:imum)?\s+)?context\s+(?:length|window)(?:\s+is)?\s+(\d[\d,]*)/i)
-          || msg.match(/(\d[\d,]*)\s+tokens?(?:\s+context)?/i)   // "131072 tokens context"
-        if (!m) return null
-        var num = parseInt(m[1].replace(/,/g, ''), 10)
-        return (Number.isFinite(num) && num > 0) ? num : null
-      }
-
-      /** Detect whether an error is a context-window-exceeded type.
-       *  Matches the CONTEXT_WINDOW_EXCEEDED code or common message patterns
-       *  used by providers (including Chinese "上下文超限"). */
-      function _isContextLimitError(code, message) {
-        if (code === 'CONTEXT_WINDOW_EXCEEDED') return true
-        if (typeof message !== 'string') return false
-        // Match English context-limit phrases
-        if (/\b(?:context\s+(?:length|window)|maximum\s+context|exceeds?\s+(?:the\s+)?(?:model'?s?\s+)?(?:maximum\s+)?context)\b/i.test(message)) return true
-        if (/\b(?:input|prompt|request)\s+(?:is\s+)?too\s+(?:long|large)\s+for\b/i.test(message)) return true
-        // Match Chinese "上下文超限" (context limit exceeded)
-        if (/上下文.*(?:超限|超出|溢出|超过)|exceed.*context|context.*exceed/i.test(message)) return true
-        return false
-      }
 
       /** Persist an error-extracted context window for the current model.
        *  Merges into modelContextWindows and sets modelContextWindowSources
@@ -927,8 +895,8 @@ var _PREFS_MAX_RETRIES = 8
             var endData = ev.data
             if (endData && endData.reason && endData.reason.kind === 'error') {
               var failure = endData.reason.error
-              if (failure && _isContextLimitError(failure.code, failure.message)) {
-                var extractedWindow = _extractWindowFromError(failure.message)
+              if (failure && isContextLimitError(failure.code, failure.message)) {
+                var extractedWindow = extractWindowFromError(failure.message)
                 if (extractedWindow && _model) {
                   _persistExtractedWindow(extractedWindow, _model, failure.code || '')
                 }
