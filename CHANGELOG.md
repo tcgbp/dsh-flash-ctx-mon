@@ -11,6 +11,26 @@ thresholds, and offers a **session skills chip** that lists the skills the curre
 session has actually loaded. It is client-side only; the host half exists just to
 hold the settings namespace and schema.
 
+## 0.2.1
+
+**Model-window edits persist into the `dsh-llm-pi-ai` namespace, and the client
+half drops its last duplicated helpers.** Editing a model's `contextWindow` or
+`maxTokens` in the panel now writes straight into the registered model's config
+in the `@deepseek-ai/dsh-llm-pi-ai` namespace
+(`providers.<pid>.models[].<field>`) when the model is registered there, keeping
+that store authoritative — the legacy ctx-mon map serves only as a fallback for
+unregistered models (contextWindow only). `_resolveWindow` reads the llm-pi-ai
+registration first, so an edit there overrides every auto-detected source while
+the provenance labels stay intact.
+
+Internal only: the three byte-identical source-tag helpers that used to live in
+the `factory-body` closure (`_effectiveSource`, `_sourceLabelKey`, `_sourceIcon`)
+are gone, replaced by the already-unit-tested pure functions in `tokens.js`, and
+the two window-persistence routines (`_persistExtractedWindow`,
+`_persistRequestContextWindow`) merge into one parameterized `_persistWindow`
+helper — each call site passes the same clobber/caching/log semantics it had
+before, so behavior is unchanged.
+
 ## 0.2.0
 
 **The browser half gains a build step, and context windows are sized in binary K.**
