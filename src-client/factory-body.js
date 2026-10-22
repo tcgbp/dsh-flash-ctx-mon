@@ -36,6 +36,9 @@ import {
   CWS_FUZZY_MATCH,
   CWS_CATALOG_UNKNOWN,
   CWS_APPROX_DEFAULT,
+  effectiveSource,
+  sourceLabelKey,
+  sourceIcon,
 } from './tokens.js'
 import { SKILL_CONTENT_PREFIX, parseSkillBlock, findSkillBlock } from './skill-detect.js'
 import { extractWindowFromError, isContextLimitError, resolveWindowFromMaps } from './ctx-window.js'
@@ -241,6 +244,8 @@ window.__ModuleLoader__.load({
     var _ctxPrefs = Object.assign({}, _CTX_ALERT_DEFAULTS)
     var _prefCtx = null
     var CTX_MON_NS = 'dsh-flash-ctx-mon'
+    var LLM_PI_AI_NS = 'llm-pi-ai'
+    var _llmPiAiState = { providers: Object.create(null), revision: 0, present: false }
     var _hostRevision = null
     var _prefWriteTail = Promise.resolve()
     var _pendingRevision = null
@@ -326,6 +331,15 @@ var _PREFS_MAX_RETRIES = 8
         }
         if (typeof ns.revision === 'number') _hostRevision = ns.revision
         console.log('[dsh-flash-ctx-mon] preferences loaded from ' + CTX_MON_NS + ' namespace')
+        var _pi = list.find(function (n) {
+          return (n && (n.ns || n.namespace)) === LLM_PI_AI_NS
+        })
+        if (_pi) {
+          var _pv = _pi.value || _pi.resolved
+          _llmPiAiState.providers = _pv && _pv.providers ? _pv.providers : Object.create(null)
+          _llmPiAiState.revision = typeof _pi.revision === 'number' ? _pi.revision : 0
+          _llmPiAiState.present = true
+        }
         return true
       }).catch(function () {
         return false
@@ -549,6 +563,7 @@ var _PREFS_MAX_RETRIES = 8
           window: window,
           source: source,
           provider: provider || null,
+          maxTokens: _resolveMaxTokens(id),
         })
       }
 
@@ -560,7 +575,8 @@ var _PREFS_MAX_RETRIES = 8
         for (var i = 0; i < userKeys.length; i++) {
           var k = userKeys[i]
           var src = (userSources && userSources[k]) || CWS_USER_MAPPING
-          addEntry(k, null, userMap[k], src, null)
+          var _uw = _resolveWindow(k)
+          addEntry(k, null, _uw.window, src, null)
         }
       }
 
@@ -576,10 +592,11 @@ var _PREFS_MAX_RETRIES = 8
             if (seen[model.id]) continue
             // Try to get window from resolve chain
             var resolved = _resolveWindow(model.id)
-            // Source: catalog-auto if we have a window, else catalog (just known from catalog, window TBD)
-            var entrySource = resolved.window
-              ? CWS_CATALOG_AUTO
-              : CWS_CATALOG_UNKNOWN
+            // llm-pi-ai registered models are shown as user mappings
+            var _llmRowC = !!_llmModelEntry(model.id)
+            var entrySource = _llmRowC
+              ? CWS_USER_MAPPING
+              : (resolved.window ? CWS_CATALOG_AUTO : CWS_CATALOG_UNKNOWN)
             addEntry(model.id, model.name, resolved.window, entrySource, group.id)
           }
         }
@@ -594,62 +611,164 @@ var _PREFS_MAX_RETRIES = 8
       return entries
     }
 
+    function _llmModelEntry(modelId) {
+      if (!modelId) return null
+      var providers = _llmPiAiState && _llmPiAiState.providers
+      if (!providers || typeof providers !== 'object') return null
+      var keys = Object.keys(providers)
+      for (var i = 0; i < keys.length; i++) {
+        var pid = keys[i]
+        var models = providers[pid] && providers[pid].models
+        if (!Array.isArray(models)) continue
+        for (var j = 0; j < models.length; j++) {
+          if (models[j] && models[j].id === modelId) return { providerId: pid, index: j }
+        }
+      }
+      return null
+    }
+
+    function _resolveMaxTokens(modelName) {
+      if (!modelName) return null
+      var llm = _llmModelEntry(modelName)
+      if (llm) {
+        var _pv2 = _llmPiAiState.providers[llm.providerId]
+        var _me2 = _pv2 && _pv2.models && _pv2.models[llm.index]
+        if (_me2 && _me2.maxTokens != null) return _me2.maxTokens
+      }
+      return null
+    }
+
+    /** Persist contextWindow / maxTokens into the authoritative
+     *  @deepseek-ai/dsh-llm-pi-ai namespace (providers.<pid>.models[].field).
+     *  update() deep-merges plain objects and REPLACES arrays, so we pass the
+     *  full replaced models array for the target provider, preserving every
+     *  other provider/model field. patch values: number to set, null to remove.
+     *  Returns a Promise<boolean>. On failure onError(patch) is called for
+     *  symmetry with savePrefs (no local mirror to revert). */
+    function _writeLlmpiAiModel(ctx, modelId, patch, onError) {
+      var settings = _remoteSettings(ctx)
+      if (!settings || typeof settings.describe !== 'function' || typeof settings.update !== 'function') {
+        if (onError) onError(patch, function () {})
+        return Promise.resolve(false)
+      }
+      return _describeAsync(settings).then(function (desc) {
+        var view = desc && (desc.value || desc)
+        var list = view && Array.isArray(view.namespaces)
+          ? view.namespaces
+          : (Array.isArray(view) ? view : null)
+        var ns = list && list.find(function (n) { return (n && (n.ns || n.namespace)) === LLM_PI_AI_NS })
+        if (!ns) { if (onError) onError(patch, function () {}); return false }
+        var value = ns.value || ns.resolved || {}
+        var providers = value.providers || {}
+        var keys = Object.keys(providers)
+        var pid = null, idx = -1
+        for (var i = 0; i < keys.length; i++) {
+          var models = providers[keys[i]] && providers[keys[i]].models
+          if (!Array.isArray(models)) continue
+          for (var j = 0; j < models.length; j++) {
+            if (models[j] && models[j].id === modelId) { pid = keys[i]; idx = j; break }
+          }
+          if (pid) break
+        }
+        if (!pid) { if (onError) onError(patch, function () {}); return false }
+        var modelsArr = providers[pid].models
+        var next = modelsArr.map(function (m) { return Object.assign({}, m) })
+        for (var field in patch) {
+          if (!Object.prototype.hasOwnProperty.call(patch, field)) continue
+          if (patch[field] === null) delete next[idx][field]
+          else next[idx][field] = patch[field]
+        }
+        var providerPatch = {}
+        providerPatch[pid] = { models: next }
+        var rev = typeof ns.revision === 'number' ? ns.revision : undefined
+        return Promise.resolve(settings.update(LLM_PI_AI_NS, { providers: providerPatch }, rev)).then(function (res) {
+          var rv = res && res.value
+          var np = rv && rv.providers
+          if (np && typeof np === 'object') _llmPiAiState.providers = np
+          if (rv && typeof rv.revision === 'number') _llmPiAiState.revision = rv.revision
+          return true
+        }).catch(function (err) {
+          console.warn('[dsh-flash-ctx-mon] llm-pi-ai write failed:', err && err.message)
+          if (onError) onError(patch, function () {})
+          return false
+        })
+      }).catch(function (err) {
+        console.warn('[dsh-flash-ctx-mon] llm-pi-ai describe failed:', err && err.message)
+        if (onError) onError(patch, function () {})
+        return false
+      })
+    }
+
+    /** Re-read the llm-pi-ai namespace so the mirror stays authoritative. */
+    function _refreshLlmpiAi(ctx) {
+      var settings = _remoteSettings(ctx)
+      if (!settings || typeof settings.describe !== 'function') return Promise.resolve(false)
+      return _describeAsync(settings).then(function (desc) {
+        var view = desc && (desc.value || desc)
+        var list = view && Array.isArray(view.namespaces)
+          ? view.namespaces
+          : (Array.isArray(view) ? view : null)
+        var ns = list && list.find(function (n) { return (n && (n.ns || n.namespace)) === LLM_PI_AI_NS })
+        if (!ns) return false
+        var _pv3 = ns.value || ns.resolved
+        _llmPiAiState.providers = _pv3 && _pv3.providers ? _pv3.providers : Object.create(null)
+        if (typeof ns.revision === 'number') _llmPiAiState.revision = ns.revision
+        _llmPiAiState.present = true
+        return true
+      }).catch(function () { return false })
+    }
+
+    /** Commit a single model field edit. field is 'contextWindow' | 'maxTokens'.
+     *  valueOrNull is a number to set, or null to clear. Persists into llm-pi-ai
+     *  when the model is registered there; otherwise falls back to the legacy
+     *  ctx-mon map (contextWindow only). */
+    function _commitModelField(ctx, id, field, valueOrNull, setTick) {
+      var llm = _llmModelEntry(id)
+      if (llm) {
+        var p = {}
+        p[field] = valueOrNull
+        _writeLlmpiAiModel(ctx, id, p, function () {}).then(function (ok) {
+          if (!ok) _refreshLlmpiAi(ctx)
+          setTick(function (v) { return v + 1 })
+        })
+        return
+      }
+      if (field === 'contextWindow') {
+        var updated = Object.assign({}, _alertPref('modelContextWindows') || {})
+        if (valueOrNull === null) delete updated[id]
+        else updated[id] = valueOrNull
+        var updatedSources = Object.assign({}, _alertPref('modelContextWindowSources') || {})
+        if (valueOrNull === null) delete updatedSources[id]
+        else updatedSources[id] = CWS_USER_MAPPING
+        savePrefs(ctx, { modelContextWindows: updated, modelContextWindowSources: updatedSources }, null, function () {})
+      }
+      setTick(function (v) { return v + 1 })
+    }
     function _resolveWindow(modelName) {
-      // Thin wrapper: the pure resolution rules live in resolveWindowFromMaps
-      // (src-client/ctx-window.js) so they can be unit-tested without the
-      // settings-service pref closure.
-      return resolveWindowFromMaps(
-        modelName,
-        _alertPref('modelContextWindows'),
-        _alertPref('modelContextWindowSources')
-      )
-    }
-
-    /** Extract the meaningful source tag from a (possibly compound) source.
-     *  Compound format: 'catalog-auto:builtin-table' — the inner part is
-     *  a valid source tag (the original source the auto-fill derived from).
-     *  Other compounds like 'error-extracted:CONTEXT_WINDOW_EXCEEDED' carry
-     *  metadata after the colon (an error code), NOT a source tag — the
-     *  outer part is the real source. */
-    function _effectiveSource(sourceTag) {
-      if (!sourceTag || sourceTag.indexOf(':') < 0) return sourceTag
-      var outer = sourceTag.slice(0, sourceTag.indexOf(':'))
-      var inner = sourceTag.slice(sourceTag.indexOf(':') + 1)
-      // Only catalog-auto uses the inner part as a valid source tag
-      if (outer === CWS_CATALOG_AUTO) return inner
-      return outer
-    }
-
-    /** Map a context-window source tag to a human-readable i18n key. */
-    function _sourceLabelKey(sourceTag) {
-      if (!sourceTag) return 'ctxSrcUnknown'
-      switch (_effectiveSource(sourceTag)) {
-        case CWS_REQUEST_CONTEXT: return 'ctxSrcRequestContext'
-        case CWS_CATALOG_AUTO: return 'ctxSrcCatalogAuto'
-        case CWS_CATALOG_UNKNOWN: return 'ctxSrcCatalogUnknown'
-        case CWS_ERROR_EXTRACTED: return 'ctxSrcErrorExtracted'
-        case CWS_USER_MAPPING: return 'ctxSrcUserMapping'
-        case CWS_BUILTIN_TABLE: return 'ctxSrcBuiltinTable'
-        case CWS_FUZZY_MATCH: return 'ctxSrcFuzzyMatch'
-        case CWS_APPROX_DEFAULT: return 'ctxSrcApproxDefault'
-        default: return 'ctxSrcUnknown'
+      if (!modelName) return { window: null, source: CWS_APPROX_DEFAULT }
+      // 0. Authoritative llm-pi-ai model config (persisted into the DSH profile
+      //    for @deepseek-ai/dsh-llm-pi-ai): providers.<pid>.models[].contextWindow.
+      var _llmW = _llmModelEntry(modelName)
+      if (_llmW) {
+        var _pw = _llmPiAiState.providers[_llmW.providerId]
+        var _mw = _pw && _pw.models && _pw.models[_llmW.index]
+        if (_mw && _mw.contextWindow != null) {
+          return { window: _mw.contextWindow, source: CWS_USER_MAPPING }
+        }
       }
-    }
-
-    /** Short source icon for the badge in the editor. */
-    function _sourceIcon(sourceTag) {
-      if (!sourceTag) return '?'
-      switch (_effectiveSource(sourceTag)) {
-        case CWS_REQUEST_CONTEXT: return '📡'
-        case CWS_CATALOG_AUTO: return '📋'
-        case CWS_CATALOG_UNKNOWN: return '📋'
-        case CWS_ERROR_EXTRACTED: return '⚠️'
-        case CWS_USER_MAPPING: return '👤'
-        case CWS_BUILTIN_TABLE: return '📖'
-        case CWS_FUZZY_MATCH: return '🔍'
-        case CWS_APPROX_DEFAULT: return '📐'
-        default: return '?'
+      // 1. Legacy user-configured mapping (host pref) — includes error-extracted &
+      //    catalog-auto values that were persisted into modelContextWindows.
+      var custom = _alertPref('modelContextWindows')
+      if (custom && typeof custom === 'object' && custom[modelName]) {
+        // Check provenance — if this entry came from error extraction or catalog, label it
+        var sources = _alertPref('modelContextWindowSources')
+        var src = (sources && typeof sources === 'object' && sources[modelName])
+          ? sources[modelName]
+          : CWS_USER_MAPPING
+        return { window: custom[modelName], source: src }
       }
+      // 2. Unknown model — return null (caller uses ctxApproxWindow as default)
+      return { window: null, source: CWS_APPROX_DEFAULT }
     }
 
     //#endregion ───────────────────────────────────────────────────────────────
@@ -711,16 +830,23 @@ var _PREFS_MAX_RETRIES = 8
       var _bindRetryTimer = null
       var _bindRetryCount = 0
 
-      /** Persist an error-extracted context window for the current model.
-       *  Merges into modelContextWindows and sets modelContextWindowSources
-       *  to record the provenance. Only writes when the extracted value
-       *  differs from what is already stored.
-       *  Does NOT overwrite a user-mapping source (user intent > auto-detected).
-       *  Overwrites any other source (catalog-auto,
-       *  request-context, etc.) because the error-extracted value comes
-       *  directly from the provider's own rejection response and is the
-       *  most authoritative source for the model's true context window. */
-      function _persistExtractedWindow(windowValue, model, errorCode) {
+      /** Canonical persistence of a derived context window for a model.
+       *  Shared by the error-extraction and request/context paths.
+       *  Merges into modelContextWindows and records provenance in
+       *  modelContextWindowSources. Only writes when the value differs from
+       *  what is already stored, and never overwrites a user-mapping source
+       *  (user intent > auto-detected).
+       *  clobber policy:
+       *  - 'always' — overwrite any other stored source. Used by the
+       *    error-extraction path: the extracted value comes directly from the
+       *    provider's own rejection response and is the most authoritative
+       *    source for the model's true context window.
+       *  - 'same-source-only' — keep a stored value that came from a different
+       *    source than `srcLabel` (it is a deliberate override: user edit,
+       *    error extraction, or catalog-auto) and disagrees with a stale
+       *    fallback (e.g. DEFAULT_CONTEXT_WINDOW); only a previously stored
+       *    value from `srcLabel` itself may be updated in place. */
+      function _persistWindow(windowValue, model, opts) {
         if (!windowValue || !model || !_ctx) return
         var currentMap = _alertPref('modelContextWindows')
         if (!currentMap || typeof currentMap !== 'object') currentMap = {}
@@ -731,58 +857,23 @@ var _PREFS_MAX_RETRIES = 8
         if (!currentSources || typeof currentSources !== 'object') currentSources = {}
         var existingSrc = currentSources[model]
         if (existingSrc === CWS_USER_MAPPING) return   // user intent wins
-
+        // A stored value from a source other than the incoming `srcLabel` is a
+        // deliberate override — do not clobber it unless the policy allows
+        // ('always' handles the most-authoritative error-extraction source).
+        if (opts.clobber !== 'always' && currentMap[model] != null && existingSrc && existingSrc !== opts.srcLabel) return
         var updated = Object.assign({}, currentMap)
         updated[model] = windowValue
-        var srcLabel = CWS_ERROR_EXTRACTED + (errorCode ? ':' + errorCode : '')
         var updatedSources = Object.assign({}, currentSources)
-        updatedSources[model] = srcLabel
+        updatedSources[model] = opts.srcLabel
         // Write both atomically in one patch
         savePrefs(_ctx, {
           modelContextWindows: updated,
           modelContextWindowSources: updatedSources,
-        }, null, function (patch, rollback) {
-          console.warn('[dsh-flash-ctx-mon] failed to persist error-extracted window:', patch)
-          if (rollback) rollback()
-        })
-        // Also update _contextWindow immediately so the next poll uses it
-        _contextWindow = windowValue
-        console.log('[dsh-flash-ctx-mon] extracted context window from error: model=' + model + ' window=' + windowValue + ' source=' + srcLabel)
-      }
-
-      /** Persist a request/context-derived context window for the current model.
-       *  The adapter's prepareCall() resolves the window DSH uses internally.
-       *  Only writes when the value differs from what is already stored.
-       *  Does NOT overwrite a user-mapping source (user intent > auto-detected).
-       *  Does NOT overwrite an error-extracted source — that value came from
-       *  the provider's own rejection and is more authoritative than the
-       *  adapter's potentially-stale fallback (e.g. DEFAULT_CONTEXT_WINDOW).
-       *  Also does not overwrite other deliberate overrides (user edit, catalog-auto). */
-      function _persistRequestContextWindow(windowValue, model) {
-        if (!windowValue || !model || !_ctx) return
-        var currentMap = _alertPref('modelContextWindows')
-        if (!currentMap || typeof currentMap !== 'object') currentMap = {}
-        // Skip if already stored with the same value
-        if (currentMap[model] === windowValue) return
-        // Check current source — do not overwrite user-mapping
-        var currentSources = _alertPref('modelContextWindowSources')
-        if (!currentSources || typeof currentSources !== 'object') currentSources = {}
-        var existingSrc = currentSources[model]
-        if (existingSrc === CWS_USER_MAPPING) return   // user intent wins
-        // If a value is already stored from a non-request-context source (e.g.
-        // user edit, error extraction, catalog-auto) and it disagrees with the
-        // adapter, the stored value is a deliberate override — do not clobber it.
-        // Only a previous request-context value may be updated in place.
-        if (currentMap[model] != null && existingSrc && existingSrc !== CWS_REQUEST_CONTEXT) return
-        var updated = Object.assign({}, currentMap)
-        updated[model] = windowValue
-        var updatedSources = Object.assign({}, currentSources)
-        updatedSources[model] = CWS_REQUEST_CONTEXT
-        savePrefs(_ctx, {
-          modelContextWindows: updated,
-          modelContextWindowSources: updatedSources,
-        }, null, function () {})
-        console.log('[dsh-flash-ctx-mon] context window from request/context: model=' + model + ' window=' + windowValue + ' source=' + CWS_REQUEST_CONTEXT)
+        }, null, opts.onError || function () {})
+        // Error-extraction path also updates _contextWindow immediately so the
+        // next poll uses it (the request path resolves at read time instead).
+        if (opts.cacheWrite) _contextWindow = windowValue
+        console.log(opts.logPrefix + ' model=' + model + ' window=' + windowValue + ' source=' + opts.srcLabel)
       }
 
       /** Extract usage from an assistant/message event.
@@ -880,7 +971,11 @@ var _PREFS_MAX_RETRIES = 8
             }
             if (rctx && typeof rctx.contextWindow === 'number' && rctx.contextWindow > 0) {
               // Persist the adapter-resolved window with source provenance
-              _persistRequestContextWindow(rctx.contextWindow, _model)
+              _persistWindow(rctx.contextWindow, _model, {
+                srcLabel: CWS_REQUEST_CONTEXT,
+                clobber: 'same-source-only',
+                logPrefix: '[dsh-flash-ctx-mon] context window from request/context:',
+              })
               // For the in-memory value, prefer the user's override when one exists
               var resolvedCtx = _resolveWindow(_model)
               _contextWindow = resolvedCtx.window != null ? resolvedCtx.window : rctx.contextWindow
@@ -898,7 +993,16 @@ var _PREFS_MAX_RETRIES = 8
               if (failure && isContextLimitError(failure.code, failure.message)) {
                 var extractedWindow = extractWindowFromError(failure.message)
                 if (extractedWindow && _model) {
-                  _persistExtractedWindow(extractedWindow, _model, failure.code || '')
+                  _persistWindow(extractedWindow, _model, {
+                    srcLabel: CWS_ERROR_EXTRACTED + (failure.code ? ':' + failure.code : ''),
+                    clobber: 'always',
+                    cacheWrite: true,
+                    onError: function (patch, rollback) {
+                      console.warn('[dsh-flash-ctx-mon] failed to persist error-extracted window:', patch)
+                      if (rollback) rollback()
+                    },
+                    logPrefix: '[dsh-flash-ctx-mon] extracted context window from error:',
+                  })
                 }
               }
             }
@@ -1061,7 +1165,7 @@ var _PREFS_MAX_RETRIES = 8
 
       return {
         start: function (ctx) {
-          _ctx = ctx     // stored for preference writes from _persistExtractedWindow
+          _ctx = ctx     // stored for preference writes from _persistWindow
           try {
             _sessions = ctx && ctx.get ? ctx.get('sessions') : undefined
           } catch (_) {}
@@ -2177,9 +2281,9 @@ var _PREFS_MAX_RETRIES = 8
       srcBadgeColors[CWS_APPROX_DEFAULT]  = { bg: 'rgba(139,148,158,0.1)', color: '#484f58' }
 
       function renderSourceBadge(sourceTag) {
-        var effective = _effectiveSource(sourceTag)
-        var icon = _sourceIcon(sourceTag)
-        var label = t(_sourceLabelKey(sourceTag))
+        var effective = effectiveSource(sourceTag)
+        var icon = sourceIcon(sourceTag)
+        var label = t(sourceLabelKey(sourceTag))
         var colors = srcBadgeColors[effective] || srcBadgeColors[CWS_APPROX_DEFAULT]
         return h('span', {
           style: Object.assign({}, badgeStyle, {
@@ -2199,18 +2303,21 @@ var _PREFS_MAX_RETRIES = 8
         var id = entry.id
         var name = entry.name
         var window = entry.window
+        var maxTokens = entry.maxTokens
         var source = entry.source
         var provider = entry.provider
 
         var displayName = name || id
         var idHint = (name && name !== id) ? id : null
+        var llmRow = _llmModelEntry(id) || null
 
         var userMap = _alertPref('modelContextWindows')
         var isInUserMap = userMap && userMap[id] != null
+        var editableRow = isInUserMap || !!llmRow
         var sources = _alertPref('modelContextWindowSources')
         var storedSource = (sources && sources[id]) || null
 
-        var effectiveSource = storedSource || source || CWS_APPROX_DEFAULT
+        var effectiveTag = storedSource || source || CWS_APPROX_DEFAULT
 
         return h('div', {
           key: id,
@@ -2223,7 +2330,7 @@ var _PREFS_MAX_RETRIES = 8
           },
         },
           // Source badge
-          renderSourceBadge(effectiveSource),
+          renderSourceBadge(effectiveTag),
           // Model name
           h('span', {
             style: {
@@ -2241,11 +2348,12 @@ var _PREFS_MAX_RETRIES = 8
               ? h('span', { style: { fontSize: '10px', opacity: 0.5, marginLeft: '4px' } }, idHint)
               : null,
           ),
-          // Window value (editable)
+          // Window value (editable) -> persists into llm-pi-ai model config
           h('input', {
             type: 'number',
             value: window != null ? window : '',
-            placeholder: 'tokens',
+            placeholder: 'ctxWin',
+            title: 'contextWindow (tokens)',
             style: {
               width: '72px',
               fontSize: '12px',
@@ -2258,45 +2366,45 @@ var _PREFS_MAX_RETRIES = 8
             },
             onChange: function (e) {
               var raw = e.target.value
-              if (raw === '') {
-                if (isInUserMap) {
-                  var updated = Object.assign({}, userMap)
-                  delete updated[id]
-                  var updatedSources = Object.assign({}, sources || {})
-                  delete updatedSources[id]
-                  _writeAlertPref(ctx, 'modelContextWindows', updated, function (patch, rollback) { rollback() })
-                  setTick(function (v) { return v + 1 })
-                }
-                return
-              }
+              if (raw === '') { _commitModelField(ctx, id, 'contextWindow', null, setTick); return }
               var val = Number(raw)
               if (!isFinite(val) || val <= 0) return
-              var updated = Object.assign({}, userMap || {})
-              updated[id] = val
-              var updatedSources = Object.assign({}, sources || {})
-              updatedSources[id] = CWS_USER_MAPPING
-              savePrefs(ctx, {
-                modelContextWindows: updated,
-                modelContextWindowSources: updatedSources,
-              }, null, function () {})
-              setTick(function (v) { return v + 1 })
+              _commitModelField(ctx, id, 'contextWindow', val, setTick)
             },
           }),
-          // Delete button (only for user-configured entries)
-          isInUserMap
+          // maxTokens value (editable)
+          h('input', {
+            type: 'number',
+            value: maxTokens != null ? maxTokens : '',
+            placeholder: 'mxTok',
+            title: 'maxTokens',
+            style: {
+              width: '64px',
+              fontSize: '12px',
+              padding: '2px 4px',
+              borderRadius: '4px',
+              border: '1px solid rgba(255,255,255,0.15)',
+              background: 'rgba(255,255,255,0.05)',
+              color: 'inherit',
+              opacity: maxTokens != null ? 1 : 0.5,
+            },
+            onChange: function (e) {
+              var raw = e.target.value
+              if (raw === '') { _commitModelField(ctx, id, 'maxTokens', null, setTick); return }
+              var val = Number(raw)
+              if (!isFinite(val) || val <= 0) return
+              _commitModelField(ctx, id, 'maxTokens', val, setTick)
+            },
+          }),
+          // Delete button (clear configured contextWindow / maxTokens)
+          editableRow
             ? h('button', {
                 type: 'button',
                 style: { background: 'none', border: 'none', color: '#f85149', cursor: 'pointer', fontSize: '14px', padding: '0 2px' },
+                title: 'reset contextWindow and maxTokens',
                 onClick: function () {
-                  var updated = Object.assign({}, userMap || {})
-                  delete updated[id]
-                  var updatedSources = Object.assign({}, sources || {})
-                  delete updatedSources[id]
-                  savePrefs(ctx, {
-                    modelContextWindows: updated,
-                    modelContextWindowSources: updatedSources,
-                  }, null, function () {})
-                  setTick(function (v) { return v + 1 })
+                  _commitModelField(ctx, id, 'contextWindow', null, setTick)
+                  _commitModelField(ctx, id, 'maxTokens', null, setTick)
                 },
               }, '✕')
             : h('span', { style: { width: '14px' } }),
@@ -2308,8 +2416,10 @@ var _PREFS_MAX_RETRIES = 8
       var newModel = _newModel[0], setNewModel = _newModel[1]
       var _newWindow = useState('')
       var newWindow = _newWindow[0], setNewWindow = _newWindow[1]
+      var _newMaxTokens = useState('')
+      var newMaxTokens = _newMaxTokens[0], setNewMaxTokens = _newMaxTokens[1]
       rows.push(h('div', { key: '_add', style: { display: 'flex', alignItems: 'center', gap: '6px', marginTop: '6px', paddingTop: '4px', borderTop: '1px solid rgba(255,255,255,0.08)' } },
-        h('span', { style: badgeStyle, title: CWS_USER_MAPPING }, _sourceIcon(CWS_USER_MAPPING), t('ctxSrcUserMapping')),
+        h('span', { style: badgeStyle, title: CWS_USER_MAPPING }, sourceIcon(CWS_USER_MAPPING), t('ctxSrcUserMapping')),
         h('input', {
           type: 'text',
           placeholder: 'model-name',
@@ -2319,29 +2429,51 @@ var _PREFS_MAX_RETRIES = 8
         }),
         h('input', {
           type: 'number',
-          placeholder: 'tokens',
+          placeholder: 'ctxWin',
+          title: 'contextWindow (tokens)',
           value: newWindow,
           style: { width: '72px', fontSize: '12px', padding: '2px 4px', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: 'inherit' },
           onChange: function (e) { setNewWindow(e.target.value) },
+        }),
+        h('input', {
+          type: 'number',
+          placeholder: 'mxTok',
+          title: 'maxTokens',
+          value: newMaxTokens,
+          style: { width: '64px', fontSize: '12px', padding: '2px 4px', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: 'inherit' },
+          onChange: function (e) { setNewMaxTokens(e.target.value) },
         }),
         h('button', {
           type: 'button',
           style: { background: 'none', border: 'none', color: 'var(--dsw-alias-brand-primary, #58a6ff)', cursor: 'pointer', fontSize: '14px', padding: '0 4px' },
           onClick: function () {
             var model = (newModel || '').trim()
-            var window = Number(newWindow)
-            if (!model || !isFinite(window) || window <= 0) return
-            var updated = Object.assign({}, _alertPref('modelContextWindows') || {})
-            updated[model] = window
-            var updatedSources = Object.assign({}, _alertPref('modelContextWindowSources') || {})
-            updatedSources[model] = CWS_USER_MAPPING
-            savePrefs(ctx, {
-              modelContextWindows: updated,
-              modelContextWindowSources: updatedSources,
-            }, null, function () {})
+            var windowV = Number(newWindow)
+            var mxV = newMaxTokens.trim() === '' ? null : Number(newMaxTokens)
+            if (!model) return
+            var llmRoot = _llmModelEntry(model)
+            if (llmRoot) {
+              var p = {}
+              if (newWindow.trim() === '') p.contextWindow = null
+              else if (isFinite(windowV) && windowV > 0) p.contextWindow = windowV
+              if (newMaxTokens.trim() === '') p.maxTokens = null
+              else if (mxV !== null && isFinite(mxV) && mxV > 0) p.maxTokens = mxV
+              _writeLlmpiAiModel(ctx, model, p, function () {})
+                .then(function (ok) { if (!ok) _refreshLlmpiAi(ctx); setTick(function (v) { return v + 1 }) })
+            } else if (newWindow.trim() !== '' && isFinite(windowV) && windowV > 0) {
+              var updated = Object.assign({}, _alertPref('modelContextWindows') || {})
+              updated[model] = windowV
+              var updatedSources = Object.assign({}, _alertPref('modelContextWindowSources') || {})
+              updatedSources[model] = CWS_USER_MAPPING
+              savePrefs(ctx, {
+                modelContextWindows: updated,
+                modelContextWindowSources: updatedSources,
+              }, null, function () {})
+              setTick(function (v) { return v + 1 })
+            }
             setNewModel('')
             setNewWindow('')
-            setTick(function (v) { return v + 1 })
+            setNewMaxTokens('')
           },
         }, '+'),
       ))
@@ -2601,7 +2733,7 @@ var _PREFS_MAX_RETRIES = 8
         // ignored.
         ctxInfoRows.push(
           h('span', { style: S.memLiveDataLabel }, t('ctxWindowSource')),
-          h('span', { style: S.memLiveDataValue }, t(_sourceLabelKey(tokenEstimate && tokenEstimate.windowSource))),
+          h('span', { style: S.memLiveDataValue }, t(sourceLabelKey(tokenEstimate && tokenEstimate.windowSource))),
         )
 
         // Context pressure (precise mode only)
@@ -3528,3 +3660,4 @@ var _PREFS_MAX_RETRIES = 8
     return client
   },
 })
+

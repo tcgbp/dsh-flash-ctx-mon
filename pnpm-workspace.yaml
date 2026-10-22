@@ -1,3 +1,6 @@
+allowBuilds:
+  esbuild: false
+
 # pnpm 12 refuses any package younger than 24 hours by default. The core was
 # published on 2026-10-08; without this exemption a fresh clone cannot install.
 # Remove this file once the window has passed.
@@ -5,6 +8,3 @@ minimumReleaseAgeExclude:
   - dsh-flash@1.0.0
 
 # Allow esbuild (and its platform binary packages) to run their install scripts.
-onlyBuiltDependencies:
-  - esbuild
-  - '@esbuild/win32-x64'
