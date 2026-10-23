@@ -11,6 +11,14 @@ thresholds, and offers a **session skills chip** that lists the skills the curre
 session has actually loaded. It is client-side only; the host half exists just to
 hold the settings namespace and schema.
 
+## 0.2.2
+
+**Release engineering only — no runtime behaviour change.** The publish workflow is
+corrected: `pnpm run --if-present build` (the flag belongs to pnpm, not the run script)
+instead of the mis-ordered `pnpm run build --if-present`, pnpm pinned to `11.5.3`, and
+the npm upgrade step pinned to `npm@11` for trusted publishing — no `registry-url`, so
+OIDC/provenance applies on publish.
+
 ## 0.2.1
 
 **Model-window edits persist into the `dsh-llm-pi-ai` namespace, and the client
