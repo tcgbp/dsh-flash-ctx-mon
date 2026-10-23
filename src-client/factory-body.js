@@ -64,6 +64,7 @@ window.__ModuleLoader__.load({
       alertContextWarning: '会话上下文即将用尽',
       alertContextError: '会话上下文几乎用尽',
       alertCtxCluster: '上下文监控',
+      alertOpenMonitorConfig: '打开监控配置',
       // Skills used in this session
       alertSkillUsed: '使用了技能',
       ctxSkillsSection: '本会话使用的技能',
@@ -126,6 +127,7 @@ window.__ModuleLoader__.load({
       alertContextWarning: 'Session context nearly exhausted',
       alertContextError: 'Session context almost exhausted',
       alertCtxCluster: 'Context Monitor',
+      alertOpenMonitorConfig: 'Open monitor config',
       // Skills used in this session
       alertSkillUsed: 'Skill used',
       ctxSkillsSection: 'Skills used in this session',
@@ -1715,6 +1717,16 @@ var _PREFS_MAX_RETRIES = 8
               icon: '🔴',
               timestamp: Date.now(),
               dismissible: true,
+              // Plugin-registered dispose action (dsh-flash alert-detail panel):
+              // jump straight into this monitor's config so the user can act
+              // before the window runs out — inspect the source, loosen a
+              // threshold, or remap the model window.
+              actions: [{
+                id: 'ctx-open-config',
+                label: function () { return t('alertOpenMonitorConfig') },
+                primary: true,
+                onClick: function () { openMonitorConfig('context') },
+              }],
             })
           } else if (ratio >= tWarn) {
             alerts.push({
@@ -1725,6 +1737,12 @@ var _PREFS_MAX_RETRIES = 8
               icon: '🟡',
               timestamp: Date.now(),
               dismissible: true,
+              actions: [{
+                id: 'ctx-open-config',
+                label: function () { return t('alertOpenMonitorConfig') },
+                primary: false,
+                onClick: function () { openMonitorConfig('context') },
+              }],
             })
           } else if (ratio >= tInfo) {
             alerts.push({
