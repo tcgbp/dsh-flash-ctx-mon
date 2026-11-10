@@ -38,6 +38,21 @@ const DEFAULT_CTX_THRESHOLD_ERROR = 95
 const DEFAULT_CTX_POLL_BASE = 20000
 const DEFAULT_CTX_POLL_MIN = 2000
 
+// ── Auto-continue (context-limit self-rescue) tunables ────────────────
+// Auto-continue is invoked only for the CURRENT session, never a background one.
+/** Grace period between a trigger and the first auto-continue (ms). */
+const DEFAULT_AUTO_RETRY_GRACE_MS = 5000
+/** Minimum interval between two auto-continues within the same session (ms). */
+const DEFAULT_AUTO_RETRY_COOLDOWN_MS = 20000
+/** Max consecutive auto-continues within one session before handing back to the user. */
+const DEFAULT_AUTO_RETRY_MAX_CONSECUTIVE = 4
+/** Exponential backoff cap for repeated auto-continues (ms). */
+const DEFAULT_AUTO_RETRY_MAX_BACKOFF_MS = 300000
+/** The exact prompt text sent to continue a stalled session (must match model output). */
+const DEFAULT_AUTO_RETRY_CONTINUE_TEXT = '继续'
+/** Window (ms) in which our own continued echo is recognised and swallowed. */
+const DEFAULT_AUTO_RETRY_ECHO_WINDOW_MS = 30000
+
 /** Resolved volatile config — each field is a live reference read with .get(). */
 export interface CtxMonConfig {
   ctxApproxWindow: Volatile<number>
@@ -48,6 +63,14 @@ export interface CtxMonConfig {
   ctxPollMin: Volatile<number>
   modelContextWindows: Volatile<Record<string, number>>
   modelContextWindowSources: Volatile<Record<string, string>>
+  // Auto-continue tunables. Volatile so users can edit through settings, but
+  // read live through .get() on the client side.
+  autoRetryGraceMs: Volatile<number>
+  autoRetryCooldownMs: Volatile<number>
+  autoRetryMaxConsecutive: Volatile<number>
+  autoRetryMaxBackoffMs: Volatile<number>
+  autoRetryContinueText: Volatile<string>
+  autoRetryEchoWindowMs: Volatile<number>
 }
 
 export const Config = Schema.object({
@@ -72,6 +95,13 @@ export const Config = Schema.object({
   // restart, which is what the priority guard in the client needs.
   modelContextWindows: Schema.dict(Schema.number()).default({}).volatile(),
   modelContextWindowSources: Schema.dict(Schema.string()).default({}).volatile(),
+  // Auto-continue tunables — live-read via .get() on the client side.
+  autoRetryGraceMs: Schema.number().default(DEFAULT_AUTO_RETRY_GRACE_MS).volatile(),
+  autoRetryCooldownMs: Schema.number().default(DEFAULT_AUTO_RETRY_COOLDOWN_MS).volatile(),
+  autoRetryMaxConsecutive: Schema.number().default(DEFAULT_AUTO_RETRY_MAX_CONSECUTIVE).volatile(),
+  autoRetryMaxBackoffMs: Schema.number().default(DEFAULT_AUTO_RETRY_MAX_BACKOFF_MS).volatile(),
+  autoRetryContinueText: Schema.string().default(DEFAULT_AUTO_RETRY_CONTINUE_TEXT).volatile(),
+  autoRetryEchoWindowMs: Schema.number().default(DEFAULT_AUTO_RETRY_ECHO_WINDOW_MS).volatile(),
 })
 
 // ── apply() ─────────────────────────────────────────────────────────────

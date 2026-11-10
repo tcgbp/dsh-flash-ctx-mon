@@ -8,6 +8,7 @@ import {
   sourceIcon,
   CWS_CATALOG_AUTO,
   CWS_BUILTIN_TABLE,
+  CWS_FUZZY_MATCH,
   CWS_ERROR_EXTRACTED,
   CWS_USER_MAPPING,
   CWS_APPROX_DEFAULT,
@@ -72,8 +73,24 @@ describe('sourceLabelKey / sourceIcon', () => {
   it('maps known sources to i18n keys', () => {
     expect(sourceLabelKey(CWS_USER_MAPPING)).toBe('ctxSrcUserMapping')
     expect(sourceLabelKey(CWS_BUILTIN_TABLE)).toBe('ctxSrcBuiltinTable')
+    expect(sourceLabelKey(CWS_FUZZY_MATCH)).toBe('ctxSrcFuzzyMatch')
     expect(sourceLabelKey(CWS_APPROX_DEFAULT)).toBe('ctxSrcApproxDefault')
     expect(sourceLabelKey(CWS_ERROR_EXTRACTED)).toBe('ctxSrcErrorExtracted')
+    expect(sourceLabelKey(CWS_CATALOG_AUTO)).toBe('ctxSrcCatalogAuto')
+    expect(sourceLabelKey(CWS_CATALOG_AUTO + ':' + CWS_BUILTIN_TABLE)).toBe('ctxSrcBuiltinTable')
+  })
+
+  it('renders retired provenance tags through the badge path', () => {
+    // Regression: stored modelContextWindowSources rows written by older
+    // versions may still carry 'builtin-table' / 'fuzzy-match' provenance.
+    // effectiveSource / sourceIcon / sourceLabelKey must keep mapping them
+    // (dedicated slots) instead of degrading to the unknown '?' fallback.
+    expect(effectiveSource(CWS_BUILTIN_TABLE)).toBe(CWS_BUILTIN_TABLE)
+    expect(effectiveSource(CWS_FUZZY_MATCH)).toBe(CWS_FUZZY_MATCH)
+    expect(effectiveSource(CWS_CATALOG_AUTO + ':' + CWS_FUZZY_MATCH)).toBe(CWS_FUZZY_MATCH)
+    expect(sourceIcon(CWS_BUILTIN_TABLE)).toBe('📖')
+    expect(sourceIcon(CWS_FUZZY_MATCH)).toBe('🔍')
+    expect(sourceLabelKey(CWS_CATALOG_AUTO + ':' + CWS_FUZZY_MATCH)).toBe('ctxSrcFuzzyMatch')
   })
 
   it('falls back to unknown for garbage', () => {

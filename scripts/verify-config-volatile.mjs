@@ -83,5 +83,22 @@ check('the mapping fields are no longer ordinary config',
   ['modelContextWindows', 'modelContextWindowSources'].map((k) => !!(fields[k] && fields[k].meta && fields[k].meta.volatile)),
   [true, true])
 
+// ── Auto-continue tunables must be writable + live-readable ─────────────
+const AUTO_RETRY_SCALARS = ['autoRetryGraceMs', 'autoRetryCooldownMs', 'autoRetryMaxConsecutive', 'autoRetryMaxBackoffMs', 'autoRetryEchoWindowMs']
+const AUTO_RETRY_STRING = 'autoRetryContinueText'
+for (const key of AUTO_RETRY_SCALARS) {
+  check(`${key} is declared`, !!fields[key], true)
+  check(`${key} carries meta.volatile`, !!(fields[key] && fields[key].meta && fields[key].meta.volatile), true)
+  check(`${key} is accepted by settings.write()`, isVolatilePath(schema, [key]), true)
+  check(`${key} defaults to a finite number`, typeof fields[key]?.meta?.default === 'number' && Number.isFinite(fields[key].meta.default), true)
+}
+check(`${AUTO_RETRY_STRING} is declared`, !!fields[AUTO_RETRY_STRING], true)
+check(`${AUTO_RETRY_STRING} carries meta.volatile`, !!(fields[AUTO_RETRY_STRING] && fields[AUTO_RETRY_STRING].meta && fields[AUTO_RETRY_STRING].meta.volatile), true)
+check(`${AUTO_RETRY_STRING} is accepted by settings.write()`, isVolatilePath(schema, [AUTO_RETRY_STRING]), true)
+check(`${AUTO_RETRY_STRING} defaults to a non-empty string`, typeof fields[AUTO_RETRY_STRING]?.meta?.default === 'string' && fields[AUTO_RETRY_STRING].meta.default.length > 0, true)
+check('the volatile form includes every auto-retry field',
+  [...AUTO_RETRY_SCALARS, AUTO_RETRY_STRING].map((k) => !!(form.dict && form.dict[k])),
+  [...AUTO_RETRY_SCALARS, AUTO_RETRY_STRING].map(() => true))
+
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)

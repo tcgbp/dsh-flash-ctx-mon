@@ -42,6 +42,23 @@ import {
 } from './tokens.js'
 import { SKILL_CONTENT_PREFIX, parseSkillBlock, findSkillBlock } from './skill-detect.js'
 import { extractWindowFromError, isContextLimitError, resolveWindowFromMaps } from './ctx-window.js'
+// Pure auto-retry / auto-continue decision primitives (§6 of the design: the
+// stateful AutoRetryRunner is composed inline below against the current session
+// binding, but the guards/transitions are pure and unit-tested here).
+import {
+  RETRYABLE_END_REASONS,
+  isRetryableEnd,
+  backoffDelayMs,
+  scheduleCooldown,
+  inCooldown,
+  makeDisarmedState,
+  armState,
+  shouldAutoContinue,
+  consumeContinuation,
+  isSelfEcho,
+  retryAttemptKey,
+  requestIdForAttempt,
+} from './auto-retry.js'
 
 window.__ModuleLoader__.load({
   id: 'dsh-flash-ctx-mon',
@@ -118,6 +135,31 @@ window.__ModuleLoader__.load({
       ctxCatalogError: '目录加载失败',
       ctxCatalogRefresh: '刷新目录',
       ctxNoWindow: '—',
+      // Auto-Retry / auto-continue
+      ctxAutoRetrySection: '自动继续',
+      autoRetryGraceMs: '重试宽限期',
+      autoRetryGraceMsTip: '回合异常结束后等待多久才自动补发“继续”。建议 3–8 秒，给模型长输出留出收尾时间。',
+      autoRetryCooldownMs: '冷却间隔',
+      autoRetryCooldownMsTip: '同一会话两次自动补发的最大频率（间隔上限）。防止“继续”连发烧钱。',
+      autoRetryMaxConsecutive: '连续次数上限',
+      autoRetryMaxConsecutiveTip: '连续补发达到此次数仍未完成即暂停，等待人工介入。',
+      autoRetryMaxBackoffMs: '最大退避',
+      autoRetryMaxBackoffMsTip: '指数退避的上限：连续失败越久，两次补发的间隔越长，但不会超过此值。',
+      autoRetryContinueText: '“继续”文本',
+      autoRetryContinueTextTip: '自动补发的消息内容。连同请求 ID 一起用于识别自身回显，请保持默认值。',
+      autoRetryEchoWindowMs: '回显识别窗口',
+      autoRetryEchoWindowMsTip: '发送“继续”后，在该窗口内收到的同名消息视为自身回显，不计入人工输入。',
+      // Auto-retry runner live status (resident overlay)
+      autoRetryRunnerSection: '自动继续状态',
+      autoRetryStateStopped: '已停止',
+      autoRetryStateArmed: '待命中',
+      autoRetryStateScheduled: '已排程',
+      autoRetryStatePaused: '已暂停，等待人工输入',
+      autoRetryAccumLabel: '累计重试',
+      autoRetryCooldownLabel: '冷却剩余',
+      autoRetryScheduledLabel: '即将补发',
+      autoRetryArmNow: '立即补发一次（发送“继续”）',
+      autoRetryDisarm: '停止自动继续',
       // Alert preview
       alertPreviewToggle: '查看告警消息样例',
     }
@@ -181,6 +223,31 @@ window.__ModuleLoader__.load({
       ctxCatalogError: 'Catalog failed',
       ctxCatalogRefresh: 'Refresh Catalog',
       ctxNoWindow: '—',
+      // Auto-Retry / auto-continue
+      ctxAutoRetrySection: 'Auto-Retry',
+      autoRetryGraceMs: 'Retry grace period',
+      autoRetryGraceMsTip: 'How long to wait after an abnormal turn/end before auto-sending “continue”. Recommended 3–8s so a long model output can finish.',
+      autoRetryCooldownMs: 'Cooldown interval',
+      autoRetryCooldownMsTip: 'Minimum spacing between two auto-continues in the same session. Prevents “continue” from burning tokens.',
+      autoRetryMaxConsecutive: 'Max consecutive',
+      autoRetryMaxConsecutiveTip: 'Pause and wait for the user once this many consecutive auto-continues still did not finish the turn.',
+      autoRetryMaxBackoffMs: 'Max backoff',
+      autoRetryMaxBackoffMsTip: 'Ceiling of the exponential backoff: the more times it fails, the longer the gap — but never more than this.',
+      autoRetryContinueText: '“Continue” text',
+      autoRetryContinueTextTip: 'The message auto-continue sends. Used (with the request id) to recognize self-echo; keep the default.',
+      autoRetryEchoWindowMs: 'Echo window',
+      autoRetryEchoWindowMsTip: 'Messages with the same text received within this window after a “continue” are treated as self-echo, not user input.',
+      // Auto-retry runner live status (resident overlay)
+      autoRetryRunnerSection: 'Auto-retry runner',
+      autoRetryStateStopped: 'Stopped',
+      autoRetryStateArmed: 'Armed',
+      autoRetryStateScheduled: 'Scheduled',
+      autoRetryStatePaused: 'Paused — waiting for you',
+      autoRetryAccumLabel: 'Retried',
+      autoRetryCooldownLabel: 'Cooldown',
+      autoRetryScheduledLabel: 'Sends in',
+      autoRetryArmNow: 'Continue now (send “continue”)',
+      autoRetryDisarm: 'Stop auto-continue',
       // Alert preview
       alertPreviewToggle: 'View alert message samples',
     }
@@ -241,6 +308,13 @@ window.__ModuleLoader__.load({
       ctxPollMin: 2000,
       modelContextWindows: {},
       modelContextWindowSources: {},
+      // Auto-Retry / auto-continue tuning (mirrors src/index.ts volatile fields)
+      autoRetryGraceMs: 5000,
+      autoRetryCooldownMs: 20000,
+      autoRetryMaxConsecutive: 4,
+      autoRetryMaxBackoffMs: 300000,
+      autoRetryContinueText: '继续',
+      autoRetryEchoWindowMs: 30000,
     }
 
     var _ctxPrefs = Object.assign({}, _CTX_ALERT_DEFAULTS)
@@ -330,6 +404,12 @@ var _PREFS_MAX_RETRIES = 8
           ctxPollMin: resolved.ctxPollMin,
           modelContextWindows: resolved.modelContextWindows,
           modelContextWindowSources: resolved.modelContextWindowSources,
+          autoRetryGraceMs: resolved.autoRetryGraceMs,
+          autoRetryCooldownMs: resolved.autoRetryCooldownMs,
+          autoRetryMaxConsecutive: resolved.autoRetryMaxConsecutive,
+          autoRetryMaxBackoffMs: resolved.autoRetryMaxBackoffMs,
+          autoRetryContinueText: resolved.autoRetryContinueText,
+          autoRetryEchoWindowMs: resolved.autoRetryEchoWindowMs,
         }
         if (typeof ns.revision === 'number') _hostRevision = ns.revision
         console.log('[dsh-flash-ctx-mon] preferences loaded from ' + CTX_MON_NS + ' namespace')
@@ -354,6 +434,12 @@ var _PREFS_MAX_RETRIES = 8
       if (typeof v === 'number' && isFinite(v)) return v
       if (v != null && typeof v === 'object') return v   // Record<string,*> values
       return _CTX_ALERT_DEFAULTS[key]
+    }
+
+    /** Read a string alert preference (e.g. the continue text), with default. */
+    function _alertStr(key) {
+      var v = _ctxPrefs && _ctxPrefs[key]
+      return (typeof v === 'string' && v) || _CTX_ALERT_DEFAULTS[key] || ''
     }
 
     /** Write an alert preference through the preference bridge (host + memory). */
@@ -793,6 +879,12 @@ var _PREFS_MAX_RETRIES = 8
      *  The MonitorConfigModal reads token estimates from this. */
     var _activeTokenSource = null
 
+    /** Optional live bridge for the resident overlay (§6). Integration code may
+     *  attach a `{ notify(view) }` object here to subscribe to auto-retry view
+     *  publishes; while null the publishes are a no-op and the overlay reads
+     *  snapshots directly from _activeTokenSource.getAutoRetryView(). */
+    var _autoRetryStore = null
+
     /**
      * SessionEventTokenSource — reads precise token usage from DSH's session
      * event stream via the `sessions` service.
@@ -831,6 +923,279 @@ var _PREFS_MAX_RETRIES = 8
       var _ctx = null       // Cordis context for preference writes (set in start)
       var _bindRetryTimer = null
       var _bindRetryCount = 0
+
+      // ─────────────────────────────────────────────────────────────────────
+      // Auto-retry / auto-continue runner state (§6 of the design).
+      //
+      // The stateful AutoRetryRunner is composed INLINE against this token
+      // source so it can reuse _sessions/_sessionId/_ctx and call
+      // `session.prompt(...)` directly. State is isolated per session id; the
+      // persistent overlay drives it through the methods exposed on the
+      // returned object (armAutoRetry / disarmAutoRetry / getAutoRetryView).
+      var _retryBySession = Object.create(null)  // sessionId -> runner record
+      var _retryRequestIdCache = new Map()       // per-session attempt keys -> requestIds (idempotent re-send)
+      var _retryTimer = null                     // single emission timer (one-at-a-time guard)
+
+      // ─ AutoRetryRunner — the inline stateful core (§6 of the design) ──────
+      // All decisions are delegated to the pure helpers in ./auto-retry.js so
+      // this block stays thin and testable. The record for the active session
+      // lives in _retryBySession; every transition writes it back through the
+      // pure state constructors, then republishes a snapshot to the module-
+      // level _autoRetryStore bridge (created by the UI layer) so the overlay
+      // never needs to know about timers.
+
+      function _retryTimersClear() {
+        if (_retryTimer) { clearTimeout(_retryTimer); _retryTimer = null }
+      }
+
+      /** The runner record for the currently bound session, if any. */
+      function _activeAutoRetryRecord() {
+        if (!_sessionId) return null
+        return _retryBySession[_sessionId] || null
+      }
+
+      /** Drop the guard entirely: stop any pending emission and forget the
+       *  session's consecutive budget. Used on genuine human input (§5.5),
+       *  on non-retryable turn/end, and on a manual disarm. */
+      function _disarmAutoRetry() {
+        _retryTimersClear()
+        if (_sessionId && _retryBySession[_sessionId]) delete _retryBySession[_sessionId]
+        _publishAutoRetryView()
+      }
+
+      /** Warm-arm the guard for the current session with a fresh budget.
+       *  Safe to call repeatedly: the budget is only re-seeded when the
+       *  record is missing or disarmed. */
+      function _armAutoRetry() {
+        if (!_sessionId) return
+        var rec = _activeAutoRetryRecord()
+        var now = Date.now()
+        if (!rec || !rec.armed) {
+          var budget = _alertPref('autoRetryMaxConsecutive')
+          _retryBySession[_sessionId] = armState(
+            makeDisarmedState(),
+            _sessionId,
+            typeof budget === 'number' && budget > 0 ? budget : 0,
+            now,
+          )
+        }
+        _publishAutoRetryView()
+      }
+
+      /** First text fragment of a content entry (may be an array of blocks or
+       *  a raw string). Used to match the self-echo exactly. */
+      function _firstTextOf(content) {
+        if (content == null) return null
+        if (typeof content === 'string') return content
+        if (Array.isArray(content)) {
+          for (var i = 0; i < content.length; i++) {
+            var part = content[i]
+            if (part == null) continue
+            if (typeof part === 'string') return part
+            if (part && typeof part.text === 'string') return part.text
+            if (part && typeof part.content === 'string') return part.content
+          }
+          return null
+        }
+        if (typeof content === 'object' && typeof content.text === 'string') return content.text
+        return null
+      }
+
+      /** Resolve the live session object for the bound id through every shape
+       *  the sessions service has exposed across DSH releases. Returns null
+       *  when no prompt-capable session is reachable (caller must fall back). */
+      function _resolveAutoSession() {
+        if (!_sessions || !_sessionId) return null
+        var candidates = []
+        try {
+          if (_sessions.sessions && _sessions.sessions[_sessionId]) candidates.push(_sessions.sessions[_sessionId])
+        } catch (_) {}
+        try {
+          var binding = _sessions.binding(_sessionId)
+          if (binding && binding.session) candidates.push(binding.session)
+          if (binding && typeof binding.prompt === 'function') candidates.push(binding)
+        } catch (_) {}
+        try {
+          if (typeof _sessions.get === 'function') candidates.push(_sessions.get(_sessionId))
+        } catch (_) {}
+        for (var i = 0; i < candidates.length; i++) {
+          var s = candidates[i]
+          if (s && typeof s.prompt === 'function') return s
+        }
+        return null
+      }
+
+      /** Cont-safe one-at-a-time dispatch of the auto-continue. Runs on the
+       *  guarded emitter; everything is best-effort and never rethrows. */
+      function _autoContinueEntry() {
+        _retryTimer = null
+        var rec = _activeAutoRetryRecord()
+        if (!rec || !rec.armed || rec.paused || !(rec.remaining > 0)) return
+        var session = _resolveAutoSession()
+        if (!session) {
+          // Cannot reach a session: silently stand down rather than spin.
+          console.warn('[dsh-flash-ctx-mon] auto-continue: no prompt-capable session for ' + _sessionId + ' — disarming')
+          _disarmAutoRetry()
+          return
+        }
+        var now = Date.now()
+        // The sent text is read live from prefs so what is echoed back and
+        // what the self-echo detector expects always agree (§5.4).
+        var continueText = _alertStr('autoRetryContinueText')
+        if (!continueText) { _disarmAutoRetry(); return }
+        var attemptSeq = rec.maxConsecutive - rec.remaining + 1
+        var requestId = requestIdForAttempt(
+          _retryRequestIdCache,
+          retryAttemptKey(_sessionId, attemptSeq),
+          function () {
+            return 'auto-retry-' + _sessionId + '-' + attemptSeq + '-' + String(now)
+          },
+        )
+        var source = { kind: 'user', rpcId: requestId, autocontinue: true }
+        var emitted = false
+        try {
+          // The injected prompt returns into the conversation log as a
+          // user/message entry whose source carries the same rpcId — that is
+          // how the self-echo detector proves it is ours (§8.4).
+          if (session.prompt.length >= 2) {
+            session.prompt([{ type: 'text', text: continueText }], { source: source })
+          } else {
+            session.prompt({ content: [{ type: 'text', text: continueText }], source: source })
+          }
+          emitted = true
+        } catch (err) {
+          console.warn('[dsh-flash-ctx-mon] auto-continue prompt failed:', err)
+        }
+        rec.lastRequestId = requestId
+        rec.lastSendAt = now
+        rec.echoedAt = null
+        // Spend one slot, raise the backoff level and open the cooldown.
+        var next = consumeContinuation(rec, now, _alertPref('autoRetryCooldownMs'))
+        next.pending = false
+        next.nextEmitAtMs = null
+        _retryBySession[_sessionId] = next
+        _publishAutoRetryView()
+        if (!emitted) _disarmAutoRetry()
+      }
+
+      /** Schedule the guarded emission for the armed session. Backoff is
+       *  purely derived from the record's level; the one-at-a-time timer
+       *  guard means a second retryable end while already scheduled just
+       *  reschedules (cooldown exempt), it can never queue emissions. */
+      function _scheduleAutoRetryEmit() {
+        _retryTimersClear()
+        var rec = _activeAutoRetryRecord()
+        if (!rec || !rec.armed || rec.paused) return
+        var now = Date.now()
+        if (inCooldown(rec.cooldownUntil, now)) {
+          // Cooldown window open — stay armed but idle; the next retryable
+          // end will re-arm the schedule once the window clears.
+          rec.pending = false
+          rec.nextEmitAtMs = null
+          _publishAutoRetryView()
+          return
+        }
+        var delay = backoffDelayMs(
+          _alertPref('autoRetryGraceMs'),
+          rec.backoffLevel,
+          _alertPref('autoRetryMaxBackoffMs'),
+        )
+        rec.pending = true
+        rec.nextEmitAtMs = now + delay
+        _retryTimer = setTimeout(function () { _autoContinueEntry() }, Math.max(0, delay))
+        _publishAutoRetryView()
+      }
+
+      /** turn/end hook: retryable ends arm + schedule; any other end while
+       *  armed means the turn settled on its own and the guard stands down. */
+      function _handleTurnEnd(reason) {
+        try {
+          if (!isRetryableEnd(reason)) { _disarmAutoRetry(); return }
+          _armAutoRetry()
+          var rec = _activeAutoRetryRecord()
+          if (!rec) return
+          if (rec.remaining <= 0) {
+            // Budget exhausted: freeze at "paused" until a human takes over.
+            if (!rec.paused) {
+              _retryBySession[_sessionId] = Object.assign({}, rec, { paused: true, pending: false, nextEmitAtMs: null })
+              _retryTimersClear()
+            }
+            _publishAutoRetryView()
+            return
+          }
+          _scheduleAutoRetryEmit()
+        } catch (e) {
+          // Non-fatal: a throwing runner must never break the event loop.
+          console.warn('[dsh-flash-ctx-mon] _handleTurnEnd error:', e)
+        }
+      }
+
+      /** user/message hook: an entry is either our own continue echoed back
+       *  (matched exactly by rpcId + text + window, §5.4) — in which case the
+       *  guard quietly stays armed — or genuine human input, which disarms. */
+      function _handleUserMessage(entry, time) {
+        try {
+          var rec = _activeAutoRetryRecord()
+          if (!rec || !rec.armed) return
+          var matched = isSelfEcho(
+            entry,
+            rec.lastRequestId,
+            _alertStr('autoRetryContinueText'),
+            _alertPref('autoRetryEchoWindowMs'),
+            rec.lastSendAt,
+            time,
+          )
+          if (matched) {
+            if (rec.lastSendAt != null && time != null) {
+              _retryBySession[_sessionId] = Object.assign({}, rec, { echoedAt: time })
+            }
+            return
+          }
+          // Not our echo → real human words → hand the wheel back.
+          console.log('[dsh-flash-ctx-mon] user message while armed does not match self-echo — disarming auto-retry')
+          _disarmAutoRetry()
+        } catch (e) {
+          // Non-fatal: malformed entries must not break the event loop.
+        }
+      }
+
+      /** Snapshot of the runner for the bound session, shaped for the overlay.
+       *  `state` is one of: stopped | armed | scheduled | paused. */
+      function _makeAutoRetryView() {
+        var rec = _activeAutoRetryRecord()
+        var now = Date.now()
+        var base = {
+          state: rec ? (rec.paused ? 'paused' : (rec.pending ? 'scheduled' : 'armed')) : 'stopped',
+          sessionId: _sessionId || null,
+          remaining: rec ? rec.remaining : 0,
+          maxConsecutive: _alertPref('autoRetryMaxConsecutive') || 0,
+          backoffLevel: rec ? rec.backoffLevel : 0,
+          cooldownUntil: rec ? rec.cooldownUntil : null,
+          nextEmitAtMs: rec ? rec.nextEmitAtMs : null,
+          lastSendAt: rec ? rec.lastSendAt : null,
+          lastRequestId: rec ? rec.lastRequestId : null,
+          inCooldown: !!(rec && inCooldown(rec.cooldownUntil, now)),
+          continueText: _alertStr('autoRetryContinueText'),
+          graceMs: _alertPref('autoRetryGraceMs'),
+          cooldownMs: _alertPref('autoRetryCooldownMs'),
+          maxBackoffMs: _alertPref('autoRetryMaxBackoffMs'),
+          echoWindowMs: _alertPref('autoRetryEchoWindowMs'),
+        }
+        if (rec && rec.maxConsecutive) {
+          base.attemptIndex = Math.max(1, rec.maxConsecutive - rec.remaining + 1)
+        } else {
+          base.attemptIndex = 0
+        }
+        return base
+      }
+
+      /** Publish the current view through the optional module-level bridge so
+       *  the overlay component re-renders without racing token-source setup. */
+      function _publishAutoRetryView() {
+        if (_autoRetryStore && typeof _autoRetryStore.notify === 'function') {
+          try { _autoRetryStore.notify(_makeAutoRetryView()) } catch (_) {}
+        }
+      }
 
       /** Canonical persistence of a derived context window for a model.
        *  Shared by the error-extraction and request/context paths.
@@ -987,26 +1352,55 @@ var _PREFS_MAX_RETRIES = 8
           }
 
           // Detect turn/end errors (e.g. "上下文超限" / CONTEXT_WINDOW_EXCEEDED)
-          // and extract the real context window from the error message.
+          // and extract the real context window from the error message. This
+          // extraction path is independent from — and coexists with — the
+          // auto-continue logic below.
           if (ev.type === 'turn/end') {
             var endData = ev.data
-            if (endData && endData.reason && endData.reason.kind === 'error') {
-              var failure = endData.reason.error
-              if (failure && isContextLimitError(failure.code, failure.message)) {
-                var extractedWindow = extractWindowFromError(failure.message)
-                if (extractedWindow && _model) {
-                  _persistWindow(extractedWindow, _model, {
-                    srcLabel: CWS_ERROR_EXTRACTED + (failure.code ? ':' + failure.code : ''),
-                    clobber: 'always',
-                    cacheWrite: true,
-                    onError: function (patch, rollback) {
-                      console.warn('[dsh-flash-ctx-mon] failed to persist error-extracted window:', patch)
-                      if (rollback) rollback()
-                    },
-                    logPrefix: '[dsh-flash-ctx-mon] extracted context window from error:',
-                  })
+            if (endData && endData.reason) {
+              var reason = endData.reason
+              if (reason.kind === 'error') {
+                var failure = reason.error
+                if (failure && isContextLimitError(failure.code, failure.message)) {
+                  var extractedWindow = extractWindowFromError(failure.message)
+                  if (extractedWindow && _model) {
+                    _persistWindow(extractedWindow, _model, {
+                      srcLabel: CWS_ERROR_EXTRACTED + (failure.code ? ':' + failure.code : ''),
+                      clobber: 'always',
+                      cacheWrite: true,
+                      onError: function (patch, rollback) {
+                        console.warn('[dsh-flash-ctx-mon] failed to persist error-extracted window:', patch)
+                        if (rollback) rollback()
+                      },
+                      logPrefix: '[dsh-flash-ctx-mon] extracted context window from error:',
+                    })
+                  }
                 }
               }
+              // Auto-retry hook: retryable ends schedule a guarded auto
+              // continue; any other end while armed means the turn settled on
+              // its own, so the guard drops back to idle rather than firing
+              // late.
+              _handleTurnEnd(reason)
+            }
+            if (seq >= 0 && seq > _lastProcessedSeq) _lastProcessedSeq = seq
+          } else if (ev.type === 'user/message') {
+            // A user/message entry is either (a) our own auto-continue being
+            // echoed back into the log (see §8.4 of the design: the injected
+            // prompt lands as a user-rpc source), or (b) genuine human input.
+            // The self-echo detector is pure; anything else disarms the guard.
+            try {
+              var udata = ev.data || {}
+              var usrc = udata.source || udata.sourceMeta || null
+              var ukind = (usrc && usrc.kind) || udata.kind || null
+              var urpc = (udata.rpcId != null) ? udata.rpcId : ((usrc && usrc.rpcId != null) ? usrc.rpcId : null)
+              var logEntry = {
+                source: { kind: ukind, rpcId: urpc },
+                text: _firstTextOf(udata.content),
+              }
+              _handleUserMessage(logEntry, typeof ev.time === 'number' ? ev.time : Date.now())
+            } catch (e) {
+              // Non-fatal: malformed user/message payload
             }
             if (seq >= 0 && seq > _lastProcessedSeq) _lastProcessedSeq = seq
           }
@@ -1193,6 +1587,9 @@ var _PREFS_MAX_RETRIES = 8
         },
 
         stop: function () {
+          _retryTimersClear()
+          _retryBySession = Object.create(null)
+          _retryRequestIdCache.clear()
           _reset()
           if (_listUnsubscribe) { try { _listUnsubscribe() } catch (_) {} }
           _listUnsubscribe = null
@@ -1255,6 +1652,14 @@ var _PREFS_MAX_RETRIES = 8
           }
           return { source: 'unavailable' }
         },
+
+          // ── Auto-retry public API (§6) ─────────────────────────────────────
+          // The persistent overlay drives the guard through these three
+          // methods; state stays isolated per session id and the view is a
+          // live snapshot of the current session's record.
+          armAutoRetry: _armAutoRetry,
+          disarmAutoRetry: _disarmAutoRetry,
+          getAutoRetryView: _makeAutoRetryView,
       }
     }
 
@@ -1972,6 +2377,18 @@ var _PREFS_MAX_RETRIES = 8
         minWidth: '42px',
         textAlign: 'right',
       },
+      autoRetryTextInput: {
+        width: '100%',
+        boxSizing: 'border-box',
+        padding: '4px 8px',
+        borderRadius: R.sm,
+        border: '0.5px solid var(--dsw-alias-border-l2, #0003)',
+        background: 'var(--dsw-alias-bg-layer-1, #f5f5f5)',
+        color: 'var(--dsw-alias-label-primary, #c9d1d9)',
+        fontSize: '12px',
+        lineHeight: '20px',
+        marginTop: '2px',
+      },
       // Monitor config modal
       monitorModalMask: {
         position: 'fixed',
@@ -2546,6 +2963,19 @@ var _PREFS_MAX_RETRIES = 8
       ],
     }
 
+    // Auto-Retry tuning slider fields — the five numeric scalars rendered in
+    // the same stacked cell style as the context parameters.
+    function _fmtMs(v) { return v + 'ms' }
+    function _fmtCount(v) { return String(v) }
+
+    var AUTO_RETRY_SLIDER_FIELDS = [
+      { key: 'autoRetryGraceMs',        labelKey: 'autoRetryGraceMs',         tooltipKey: 'autoRetryGraceMsTip',         min: 1000,   max: 30000,   step: 500,   format: _fmtMs },
+      { key: 'autoRetryCooldownMs',     labelKey: 'autoRetryCooldownMs',      tooltipKey: 'autoRetryCooldownMsTip',      min: 5000,   max: 120000,  step: 5000,  format: _fmtMs },
+      { key: 'autoRetryMaxConsecutive', labelKey: 'autoRetryMaxConsecutive',  tooltipKey: 'autoRetryMaxConsecutiveTip',  min: 1,      max: 12,      step: 1,     format: _fmtCount },
+      { key: 'autoRetryMaxBackoffMs',   labelKey: 'autoRetryMaxBackoffMs',    tooltipKey: 'autoRetryMaxBackoffMsTip',    min: 10000,  max: 900000,  step: 10000, format: _fmtMs },
+      { key: 'autoRetryEchoWindowMs',   labelKey: 'autoRetryEchoWindowMs',    tooltipKey: 'autoRetryEchoWindowMsTip',    min: 5000,   max: 120000,  step: 1000,  format: _fmtMs },
+    ]
+
     var MONITOR_TITLE_KEY = {
       context: 'alertCtxCluster',
     }
@@ -2598,12 +3028,23 @@ var _PREFS_MAX_RETRIES = 8
       var _dataFolded = useState(true)
       var dataFolded = _dataFolded[0], setDataFolded = _dataFolded[1]
 
+      // Auto-Retry tuning is also a reference section — folded by default.
+      var _autoFolded = useState(true)
+      var autoFolded = _autoFolded[0], setAutoFolded = _autoFolded[1]
+
       // Close on Escape.
       useEffect(function () {
         function onKey(e) { if (e.key === 'Escape') onClose() }
         document.addEventListener('keydown', onKey)
         return function () { document.removeEventListener('keydown', onKey) }
       }, [onClose])
+
+      // Keep the auto-retry runner status live while the panel is open: the
+      // 1s tick refreshes the cooldown / scheduled countdown badges below.
+      useEffect(function () {
+        var iv = setInterval(function () { setTick(function (v) { return v + 1 }) }, 1000)
+        return function () { clearInterval(iv) }
+      }, [])
 
       // Render one parameter cell: label (and optional hint) above the slider.
       // Stacked rather than label-left because a two-column grid leaves each
@@ -2637,6 +3078,105 @@ var _PREFS_MAX_RETRIES = 8
         )
       }
 
+      // ── Auto-retry runner live status (resident overlay, §6 of the design) ──
+      function getRunnerView() {
+        var src = _activeTokenSource
+        if (!src || typeof src.getAutoRetryView !== 'function') return null
+        try { return src.getAutoRetryView() || null } catch (_) { return null }
+      }
+      function fmtSeconds(ms) {
+        var s = Math.max(0, Math.ceil((Number(ms) || 0) / 1000))
+        if (s >= 60) { var m = Math.floor(s / 60); return m + 'm ' + (s % 60) + 's' }
+        return s + 's'
+      }
+      function runnerCountdown(rv) {
+        if (!rv) return null
+        var now = Date.now()
+        if (rv.state === 'scheduled' && rv.nextEmitAtMs != null && rv.nextEmitAtMs > now) {
+          return { key: t('autoRetryScheduledLabel'), value: fmtSeconds(rv.nextEmitAtMs - now) }
+        }
+        if (rv.cooldownUntil && rv.cooldownUntil > now) {
+          return { key: t('autoRetryCooldownLabel'), value: fmtSeconds(rv.cooldownUntil - now) }
+        }
+        return null
+      }
+      function runnerTrigger(which) {
+        var src = _activeTokenSource
+        if (!src || typeof src[which] !== 'function') return
+        try { src[which]() } catch (_) {}
+        setTick(function (v) { return v + 1 })
+      }
+
+      var runnerView = getRunnerView()
+      var runnerState = runnerView && runnerView.state ? runnerView.state : 'stopped'
+      var runnerStateText = {
+        stopped: t('autoRetryStateStopped'),
+        armed: t('autoRetryStateArmed'),
+        scheduled: t('autoRetryStateScheduled'),
+        paused: t('autoRetryStatePaused'),
+      }[runnerState] || t('autoRetryStateStopped')
+      var runnerStateColor = {
+        stopped: '#868e96',
+        armed: '#2f9e44',
+        scheduled: '#e8590c',
+        paused: '#e03131',
+      }[runnerState] || '#868e96'
+      var runnerAtt = null
+      if (runnerView) {
+        var _max = Number(runnerView.maxConsecutive) || 0
+        var _rem = runnerView.remaining
+        var _idx = runnerView.attemptIndex != null
+          ? runnerView.attemptIndex
+          : (_rem != null && _max > 0 ? String(Math.max(0, _max - _rem)) : '?')
+        runnerAtt = t('autoRetryAccumLabel') + ' ' + _idx + '/' + _max
+      }
+      var runnerCd = runnerCountdown(runnerView)
+      var armDisabled = !runnerView || runnerState === 'scheduled' || runnerState === 'paused'
+        || (runnerView.remaining != null && Number(runnerView.remaining) <= 0) || runnerState === 'stopped'
+      var disarmDisabled = !runnerView || runnerState === 'stopped'
+      var RUNNER_MUTED = { fontSize: '12px', color: '#868e96', marginRight: '8px' }
+      var RUNNER_BTN = {
+        border: '1px solid currentColor',
+        borderRadius: '4px',
+        padding: '3px 10px',
+        fontSize: '11px',
+        lineHeight: '1.5',
+        background: 'transparent',
+        marginRight: '8px',
+      }
+      var autoRetryRunnerEl = h('div', { key: 'auto-retry-runner-status' },
+        h('div', { style: S.memSubSectionLabel }, t('autoRetryRunnerSection')),
+        h('div', { style: { marginTop: '6px', display: 'flex', alignItems: 'center', flexWrap: 'wrap' } },
+          h('span', {
+            style: {
+              display: 'inline-block',
+              border: '1px solid ' + runnerStateColor,
+              color: runnerStateColor,
+              borderRadius: '999px',
+              padding: '1px 8px',
+              fontSize: '11px',
+              marginRight: '8px',
+            },
+          }, runnerStateText),
+          runnerAtt ? h('span', { style: RUNNER_MUTED }, runnerAtt) : null,
+          runnerCd ? h('span', { style: RUNNER_MUTED }, runnerCd.key + ' ' + runnerCd.value) : null,
+        ),
+        h('div', { style: { marginTop: '8px', display: 'flex', alignItems: 'center' } },
+          h('button', {
+            type: 'button',
+            style: Object.assign({}, RUNNER_BTN, { color: '#2f9e44', opacity: armDisabled ? 0.45 : 1, cursor: armDisabled ? 'not-allowed' : 'pointer' }),
+            disabled: armDisabled,
+            onClick: function () { runnerTrigger('armAutoRetry') },
+          }, t('autoRetryArmNow')),
+          h('button', {
+            type: 'button',
+            style: Object.assign({}, RUNNER_BTN, { color: '#e03131', opacity: disarmDisabled ? 0.45 : 1, cursor: disarmDisabled ? 'not-allowed' : 'pointer' }),
+            disabled: disarmDisabled,
+            onClick: function () { runnerTrigger('disarmAutoRetry') },
+          }, t('autoRetryDisarm')),
+        ),
+      )
+
       // Configuration parameters — folded by default, like the alert preview.
       var fieldEls = h('div', { key: 'ctx-params-section' },
         // The skills section leads the body for the context monitor, so the
@@ -2652,6 +3192,43 @@ var _PREFS_MAX_RETRIES = 8
         ),
         !paramsFolded
           ? h('div', { style: Object.assign({}, S.paramGrid, { marginTop: '10px' }) }, fields.map(renderSliderField))
+          : null,
+      )
+
+      // Auto-Retry tuning — the resident continue/stop runner's safety scalars
+      // plus the exact continue text it resends. Folded by default like the
+      // rest of the reference sections.
+      var continueText = _alertStr('autoRetryContinueText')
+      var autoRetryEl = h('div', { key: 'ctx-auto-retry-section' },
+        h('div', { style: S.monitorModalDivider }),
+        h('button', {
+          type: 'button',
+          style: S.sectionFoldToggle,
+          onClick: function () { setAutoFolded(function (v) { return !v }) },
+        },
+          (autoFolded ? '▸ ' : '▾ ') + t('ctxAutoRetrySection'),
+        ),
+        !autoFolded
+          ? h('div', { style: Object.assign({}, S.paramGrid, { marginTop: '10px' }) },
+              AUTO_RETRY_SLIDER_FIELDS.map(renderSliderField),
+              h('div', { key: 'autoRetryContinueText', style: S.paramCell },
+                h('div', { style: S.paramLabel },
+                  h('span', { style: S.switchIcon }, '✎'),
+                  h('span', null, t('autoRetryContinueText')),
+                ),
+                h('input', {
+                  type: 'text',
+                  style: S.autoRetryTextInput,
+                  value: continueText,
+                  placeholder: _CTX_ALERT_DEFAULTS.autoRetryContinueText,
+                  onChange: function (e) {
+                    _writeAlertPref(_prefCtx, 'autoRetryContinueText', e.target.value, function (patch, rollback) { rollback() })
+                    setTick(function (v) { return v + 1 })
+                  },
+                }),
+              ),
+              autoRetryRunnerEl,
+            )
           : null,
       )
 
@@ -2862,6 +3439,7 @@ var _PREFS_MAX_RETRIES = 8
           h('div', { style: S.monitorModalBody },
             skillSectionEl,
             fieldEls,
+            autoRetryEl,
             alertPreviewEl,
             ctxLiveDataEl,
           ),

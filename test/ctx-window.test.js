@@ -80,6 +80,37 @@ describe('resolveWindowFromMaps', () => {
     })
   })
 
+  it('never falls back to the retired builtin window table', () => {
+    // Regression: _KNOWN_WINDOWS was retired and is kept only so that old
+    // persisted 'builtin-table' / 'fuzzy-match' provenance still renders.
+    // The resolver must treat the user map as the ONLY source of window
+    // sizes — models the retired table used to know are unknowns again.
+    const historicallyKnown = [
+      'deepseek-chat',
+      'deepseek-reasoner',
+      'gpt-4o',
+      'gpt-4o-mini',
+      'claude-3-5-sonnet-20240620',
+    ]
+    for (const name of historicallyKnown) {
+      expect(resolveWindowFromMaps(name, {}, {})).toEqual({
+        window: null,
+        source: CWS_APPROX_DEFAULT,
+      })
+    }
+  })
+
+  it('does not resurrect a window from stale builtin-table provenance', () => {
+    // Even when a stale provenance row names the retired table, the
+    // resolver still returns approximate-default with no window value in
+    // the user map — provenance alone never assigns a window.
+    const sourcesOnly = { 'gpt-4': 'builtin-table' }
+    expect(resolveWindowFromMaps('gpt-4', {}, sourcesOnly)).toEqual({
+      window: null,
+      source: CWS_APPROX_DEFAULT,
+    })
+  })
+
   it('returns approximate-default for a falsy model name', () => {
     expect(resolveWindowFromMaps('', windows, {})).toEqual({
       window: null,
