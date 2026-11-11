@@ -160,6 +160,14 @@ window.__ModuleLoader__.load({
       autoRetryScheduledLabel: '即将补发',
       autoRetryArmNow: '立即补发一次（发送“继续”）',
       autoRetryDisarm: '停止自动继续',
+      autoRetryHint: '自动继续已开启',
+      // Continue-prompt modal (offered after a manual "continue" message)
+      continuePromptTitle: '开启自动重试？',
+      continuePromptBody: '检测到本次会话发送了“继续”。开启自动重试后，回合异常中断时会自动补发，无需每次手动操作；你也可以随时在本会话中关闭。',
+      continuePromptEnable: '为本次会话开启',
+      continuePromptDecline: '暂不开启',
+      continuePromptArmed: '已开启自动重试',
+      continuePromptClose: '关闭',
       // Alert preview
       alertPreviewToggle: '查看告警消息样例',
     }
@@ -248,6 +256,14 @@ window.__ModuleLoader__.load({
       autoRetryScheduledLabel: 'Sends in',
       autoRetryArmNow: 'Continue now (send “continue”)',
       autoRetryDisarm: 'Stop auto-continue',
+      autoRetryHint: 'auto-continue active',
+      // Continue-prompt modal (offered after a manual "continue" message)
+      continuePromptTitle: 'Enable auto-retry?',
+      continuePromptBody: 'This session just sent “continue”. With auto-retry on, interrupted turns resend it automatically so you don’t have to — you can switch it off anytime for this session.',
+      continuePromptEnable: 'Enable for this session',
+      continuePromptDecline: 'Not now',
+      continuePromptArmed: 'Auto-retry is on',
+      continuePromptClose: 'Close',
       // Alert preview
       alertPreviewToggle: 'View alert message samples',
     }
@@ -885,6 +901,175 @@ var _PREFS_MAX_RETRIES = 8
      *  snapshots directly from _activeTokenSource.getAutoRetryView(). */
     var _autoRetryStore = null
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Persistent auto-continue indicator on the resident flash icon (§8).
+    //
+    // The always-present floating flash trigger button is rendered by the
+    // dsh-flash plugin itself — it carries dsh-flash's own attribute
+    // `[data-dsh-flash-trigger]`, which is a stable, public selector we can
+    // target without touching dsh-flash's source. This block makes that icon
+    // VISIBLY reflect the auto-continue state of the current session:
+    //   - armed     → a steady pulsing GREEN glow ring  (auto-continue on deck)
+    //   - scheduled → a faster flashing ORANGE glow     (auto-send imminent)
+    //   - paused    → a solid RED ring (no pulse)       (auto-continue halted)
+    //   - stopped   → no effect, attributes removed
+    //
+    // The mechanism stays additive and DOM-light: every auto-retry view
+    // publish mirrors the state onto document.documentElement as data
+    // attributes + two CSS custom properties (attempt / ratio), and ONE
+    // cross-plugin stylesheet (injected lazily, removal on dispose) turns
+    // those into the glow on dsh-flash's button. The data layer stays pure; the
+    // UI layer installs its `notify` into _autoRetryStore at apply time.
+    var _autoRetryIndicatorStyle = null
+
+    function _ensureAutoRetryIndicatorStyle() {
+      if (_autoRetryIndicatorStyle || typeof document === 'undefined' || !document.head) return
+      try {
+        var style = document.createElement('style')
+        style.id = 'ctx-mon-autoretry-indicator'
+        style.textContent = [
+          // Ring width scales with the attempt/retry ratio (inherited from <html>).
+          '@keyframes ctxmon-glow-armed{0%,100%{box-shadow:0 0 0 2px rgba(47,158,68,.95),0 0 10px 2px rgba(47,158,68,.5)}50%{box-shadow:0 0 0 calc(3px + (var(--ctxmon-ratio,0)*5px)) rgba(47,158,68,.5),0 0 16px calc(2px + (var(--ctxmon-ratio,0)*6px)) rgba(47,158,68,.85)}}',
+          '@keyframes ctxmon-glow-scheduled{0%,100%{box-shadow:0 0 0 2px rgba(232,89,12,.95),0 0 10px 2px rgba(232,89,12,.6)}50%{box-shadow:0 0 0 4px rgba(232,89,12,.5),0 0 18px 5px rgba(232,89,12,.9)}}',
+          '@keyframes ctxmon-badge-pulse{0%,100%{opacity:1}50%{opacity:.65}}',
+          // armed — steady green pulse
+          'html[data-ctx-mon-autoretry=armed] [data-dsh-flash-trigger]{' +
+            'animation:ctxmon-glow-armed 1.8s ease-in-out infinite !important;' +
+          '}',
+          // scheduled — faster orange flash (backoff/grace rhythm)
+          'html[data-ctx-mon-autoretry=scheduled] [data-dsh-flash-trigger]{' +
+            'animation:ctxmon-glow-scheduled 0.85s ease-in-out infinite !important;' +
+          '}',
+          // paused — solid red ring, no motion
+          'html[data-ctx-mon-autoretry=paused] [data-dsh-flash-trigger]{' +
+            'box-shadow:0 0 0 2px rgba(224,49,49,.9),0 0 10px 2px rgba(224,49,49,.5) !important;' +
+            'animation:none !important;' +
+          '}',
+          // Color the icon itself so armed/scheduled read at a glance even when
+          // the glow is subtle. dsh-flash sets the color inline, so !important
+          // is required to win over its stylesheet.
+          'html[data-ctx-mon-autoretry=armed] [data-dsh-flash-trigger]{' +
+            'color:rgba(47,158,68,1) !important;' +
+          '}',
+          'html[data-ctx-mon-autoretry=scheduled] [data-dsh-flash-trigger]{' +
+            'color:rgba(232,89,12,1) !important;' +
+          '}',
+          'html[data-ctx-mon-autoretry=paused] [data-dsh-flash-trigger]{' +
+            'color:rgba(224,49,49,1) !important;' +
+          '}',
+          // Numeric attempt badge (top-left pill) driven by a data attribute we
+          // put on the button itself; it inherits the state color. Hidden by the
+          // lack of the data attribute (stopped), so no matching element is shown.
+          'html[data-ctx-mon-autoretry] [data-dsh-flash-trigger][data-ctx-mon-autoretry-attempt]::after{' +
+            'content:attr(data-ctx-mon-autoretry-attempt);' +
+            'position:absolute;top:-5px;left:-5px;min-width:15px;height:15px;' +
+            'padding:0 4px;border-radius:8px;font-size:9px;line-height:15px;' +
+            'text-align:center;font-weight:700;color:#fff;' +
+            'z-index:1;' +
+          '}',
+          'html[data-ctx-mon-autoretry=armed] [data-dsh-flash-trigger][data-ctx-mon-autoretry-attempt]::after{background:rgba(47,158,68,1);}',
+          'html[data-ctx-mon-autoretry=scheduled] [data-dsh-flash-trigger][data-ctx-mon-autoretry-attempt]::after{background:rgba(232,89,12,1);animation:ctxmon-badge-pulse .9s ease-in-out infinite;}',
+          'html[data-ctx-mon-autoretry=paused] [data-dsh-flash-trigger][data-ctx-mon-autoretry-attempt]::after{background:rgba(224,49,49,1);}',
+        ].join('\n')
+        document.head.appendChild(style)
+        _autoRetryIndicatorStyle = style
+      } catch (e) {
+        console.error('[dsh-flash-ctx-mon] failed to inject auto-retry indicator style:', e)
+      }
+    }
+
+    /** Mirror an auto-retry view onto the <html> root so the cross-plugin
+     *  stylesheet can drive the flash icon. Also reaches into dsh-flash's own
+     *  trigger button(s) to update the numeric attempt hint title, which is the
+     *  lightest way to surface "2/10" without fighting dsh-flash's badge slot.
+     *  No-op for non-armed/stopped states (clears everything). */
+    function _syncAutoRetryDomIndicator(view) {
+      if (typeof document === 'undefined' || !document.documentElement) return
+      var root = document.documentElement
+      var state = view && view.state
+      if (!state || state === 'stopped') {
+        root.removeAttribute('data-ctx-mon-autoretry')
+        root.removeAttribute('data-ctx-mon-autoretry-attempt')
+        try { root.style.removeProperty('--ctxmon-ratio') } catch (_) {}
+        try {
+          var dead = document.querySelectorAll('[data-ctx-mon-autoretry-attempt]')
+          for (var d = 0; d < dead.length; d++) {
+            dead[d].removeAttribute('data-ctx-mon-autoretry-attempt')
+            dead[d].removeAttribute('title')
+          }
+        } catch (_) {}
+        return
+      }
+      if (state !== 'armed' && state !== 'scheduled' && state !== 'paused') return
+      _ensureAutoRetryIndicatorStyle()
+      root.setAttribute('data-ctx-mon-autoretry', state)
+      var idx = (view && view.attemptIndex) || 0
+      var max = (view && view.maxConsecutive) || 0
+      var label = max > 0 ? (idx + '/' + max) : ('attempt ' + idx)
+      root.setAttribute('data-ctx-mon-autoretry-attempt', label)
+      var ratio = max > 0 ? Math.min(1, idx / max) : 0
+      try { root.style.setProperty('--ctxmon-ratio', String(ratio)) } catch (_) {}
+      // Stamp the numeric readout onto dsh-flash's own trigger button(s) as a
+      // data attribute the stylesheet turns into the `::after` badge, and set
+      // the title hint so hovering the glow explains it. Re-stamping is cheap.
+      try {
+        var btns = document.querySelectorAll('[data-dsh-flash-trigger]')
+        var suffix = t('autoRetryHint') || 'auto-continue active'
+        var hint = suffix + ' · attempt ' + (idx > 0 ? (idx + '/' + max) : String(idx))
+        for (var i = 0; i < btns.length; i++) {
+          btns[i].setAttribute('data-ctx-mon-autoretry-attempt', label)
+          btns[i].setAttribute('title', hint)
+        }
+      } catch (_) {}
+    }
+
+    /** Remove the injected indicator stylesheet and all root-level marks. */
+    function _clearAutoRetryDomIndicator() {
+      if (_autoRetryIndicatorStyle) {
+        try { _autoRetryIndicatorStyle.remove() } catch (_) {}
+        _autoRetryIndicatorStyle = null
+      }
+      if (typeof document !== 'undefined' && document.documentElement) {
+        var root = document.documentElement
+        root.removeAttribute('data-ctx-mon-autoretry')
+        root.removeAttribute('data-ctx-mon-autoretry-attempt')
+        try { root.style.removeProperty('--ctxmon-ratio') } catch (_) {}
+      }
+      try {
+        var btns = document.querySelectorAll('[data-ctx-mon-autoretry-attempt]')
+        for (var i = 0; i < btns.length; i++) {
+          btns[i].removeAttribute('data-ctx-mon-autoretry-attempt')
+          btns[i].removeAttribute('title')
+        }
+      } catch (_) {}
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // "Continue → offer auto-retry" bridge (§7 of the design).
+    //
+    // When the user types a bare continue word (「继续」/ "continue") as a HUMAN
+    // message and the current session has NOT yet armed auto-retry, the runner
+    // offers to arm it. The offer is not a modal we can render from the token
+    // source (pure data layer, no React) — so the runner records the offer and
+    // the UI layer mounts it through this module-level bridge, exactly like
+    // _autoRetryStore above. The bridge holds the ONE callable the UI installs
+    // at apply time; while null the offer is simply dropped (no UI present).
+    //
+    // The same per-session cooldown map lives here (module scope) rather than
+    // inside a token source so the "don't nag again" state survives a source
+    // stop/start cycle (a re-bind on session switch resets a source's own vars).
+    var _continuePromptBridge = { handler: null }
+    /** Persist the latest pending offer so a late-mounted UI can still show it. */
+    var _continuePromptPending = null
+    /** last-offered timestamp per sessionId, to stop re-nagging. */
+    var _continuePromptAt = Object.create(null)
+    /** How long to wait before offering again for the same session (ms). */
+    var CONTINUE_PROMPT_COOLDOWN_MS = 60000
+    /** Transient React root/host for the continue-prompt modal (mirrors the
+     *  per-modal `_monitorConfigRoot`/`_monitorConfigHost` pattern). */
+    var _continuePromptRoot = null
+    var _continuePromptHost = null
+
     /**
      * SessionEventTokenSource — reads precise token usage from DSH's session
      * event stream via the `sessions` service.
@@ -1197,6 +1382,54 @@ var _PREFS_MAX_RETRIES = 8
         }
       }
 
+      /** Normalize a continue-word for matching: trim, lowercase, and collapse
+       *  any internal whitespace so " 继续 " and "CONTINUE" both match. */
+      function _normalizeContinue(text) {
+        if (text == null) return ''
+        return String(text).toLowerCase().replace(/\s+/g, '')
+      }
+
+      /** Does a human message read as a bare "continue" word?
+       *  Matches the configured continue text plus the conventional Chinese and
+       *  English equivalents, case- and whitespace-insensitively. Deliberately
+       *  only matches when the ENTIRE message is that word (no trailing prose),
+       *  so a real instruction that merely mentions "continue" is never offered. */
+      function _matchesContinueWord(text) {
+        var n = _normalizeContinue(text)
+        if (!n) return false
+        var configured = _alertStr('autoRetryContinueText')
+        if (_normalizeContinue(configured) === n) return true
+        return n === '继续' || n === 'continue' || n === 'cont'
+      }
+
+      /** user/message companion hook: when auto-retry is NOT armed and the human
+       *  typed a bare continue word into THIS session, offer to arm it. Runs in
+       *  every state (not only armed like _handleUserMessage) so the offer can
+       *  surface before any failure has happened. Self-echoed continue messages
+       *  injected by an ALREADY armed runner never reach this point because the
+       *  caller short-circuits armed sessions. Per-session cooldown stops nagging. */
+      function _maybePromptAutoRetry(entry, time) {
+        try {
+          var rec = _activeAutoRetryRecord()
+          if (rec && rec.armed) return                    // already running
+          var text = _firstTextOf(entry.text != null ? entry.text : entry)
+          if (!text || !_matchesContinueWord(text)) return
+          var sid = _sessionId
+          if (!sid) return
+          var now = Date.now()
+          var last = _continuePromptAt[sid]
+          if (typeof last === 'number' && now - last < CONTINUE_PROMPT_COOLDOWN_MS) return
+          // The runner (data layer) cannot render — just record + forward.
+          _continuePromptAt[sid] = now
+          _continuePromptPending = { sessionId: sid, text: text, at: now }
+          if (_continuePromptBridge && typeof _continuePromptBridge.handler === 'function') {
+            try { _continuePromptBridge.handler(_continuePromptPending) } catch (_) {}
+          }
+        } catch (e) {
+          // Non-fatal: the offer must never disrupt message processing.
+        }
+      }
+
       /** Canonical persistence of a derived context window for a model.
        *  Shared by the error-extraction and request/context paths.
        *  Merges into modelContextWindows and records provenance in
@@ -1398,7 +1631,12 @@ var _PREFS_MAX_RETRIES = 8
                 source: { kind: ukind, rpcId: urpc },
                 text: _firstTextOf(udata.content),
               }
+              // Snapshot whether the guard was already running the instant this
+              // message landed: a message that interrupts an armed retry is a
+              // deliberate human take-over, so it must NOT re-offer itself.
+              var enteredArmed = !!(_activeAutoRetryRecord() && _activeAutoRetryRecord().armed)
               _handleUserMessage(logEntry, typeof ev.time === 'number' ? ev.time : Date.now())
+              if (!enteredArmed) _maybePromptAutoRetry(logEntry, typeof ev.time === 'number' ? ev.time : Date.now())
             } catch (e) {
               // Non-fatal: malformed user/message payload
             }
@@ -1470,6 +1708,12 @@ var _PREFS_MAX_RETRIES = 8
         } catch (e) {
           console.warn('[dsh-flash-ctx-mon] SessionEventTokenSource: bindToSession error: ' + (e.message || e))
         }
+        // Every bind (first bind, retry, and session switch) must republish the
+        // current auto-retry snapshot to the DOM indicator. The per-session rec
+        // survives _reset(), so returning to a previously armed session re-lights
+        // the glow immediately (regression: the indicator was lost on switch-back
+        // because switching sessions never re-published the view).
+        _publishAutoRetryView()
       }
 
       /** Find a session id that has a live materialized binding. */
@@ -3007,6 +3251,112 @@ var _PREFS_MAX_RETRIES = 8
       }
     }
 
+    /** Dismiss the continue-prompt modal, if one is open. */
+    function closeContinuePrompt() {
+      if (_continuePromptRoot) { try { _continuePromptRoot.unmount() } catch (_) {} _continuePromptRoot = null }
+      if (_continuePromptHost) { try { _continuePromptHost.remove() } catch (_) {} _continuePromptHost = null }
+    }
+
+    /**
+     * Remount the continue-prompt modal for the current pending offer.
+     * Returns false when React DOM is unavailable or there is nothing to show.
+     */
+    function openContinuePrompt() {
+      if (!ReactDOMClient || !ReactDOMClient.createRoot) return false
+      if (!_continuePromptPending) return false
+      closeContinuePrompt()
+      var host = document.createElement('div')
+      host.style.cssText = 'position:fixed;inset:0;z-index:2200;'
+      document.body.appendChild(host)
+      _continuePromptHost = host
+      try {
+        _continuePromptRoot = ReactDOMClient.createRoot(host)
+        _continuePromptRoot.render(h(ContinuePromptModal, {
+          onClose: closeContinuePrompt,
+        }))
+        return true
+      } catch (e) {
+        console.error('[dsh-flash-ctx-mon] failed to open continue prompt:', e)
+        closeContinuePrompt()
+        return false
+      }
+    }
+
+    /**
+     * React component: the "open auto-retry?" popup offered after a human
+     * "continue" message. Reuses the shared modal chrome (mask/card/head/body)
+     * so it visually matches the monitor config modal. Two actions:
+     *   - Enable  → arm auto-retry for the active session, then close.
+     *   - Decline → record the per-session cooldown and close.
+     */
+    var CONTINUE_BTN = {
+      border: '1px solid currentColor',
+      borderRadius: '4px',
+      padding: '3px 10px',
+      fontSize: '11px',
+      lineHeight: '1.5',
+      background: 'transparent',
+    }
+    function ContinuePromptModal(props) {
+      var onClose = props.onClose
+
+      function _armAndClose() {
+        var src = _activeTokenSource
+        if (src && typeof src.armAutoRetry === 'function') {
+          try { src.armAutoRetry() } catch (_) {}
+        }
+        onClose()
+      }
+
+      function _declineAndClose() {
+        if (_continuePromptPending) {
+          _continuePromptAt[_continuePromptPending.sessionId] = Date.now()
+        }
+        _continuePromptPending = null
+        onClose()
+      }
+
+      // Headline reflects whether auto-retry is already running for this
+      // session (read from the token source's live view; armed === 'armed').
+      var armed = !!(function () {
+        var src = _activeTokenSource
+        if (!src || typeof src.getAutoRetryView !== 'function') return false
+        try {
+          var view = src.getAutoRetryView()
+          return !!(view && view.state === 'armed')
+        } catch (_) { return false }
+      }())
+
+      return h('div', { style: S.monitorModalMask },
+        h('div', { style: S.monitorModal },
+          h('div', { style: S.monitorModalHead },
+            h('span', { style: S.monitorModalTitle }, t('continuePromptTitle')),
+            h('button', {
+              type: 'button',
+              style: S.monitorModalClose,
+              onClick: _declineAndClose,
+            }, '✕'),
+          ),
+          h('div', { style: S.monitorModalBody },
+            h('div', { style: { fontSize: '13px', lineHeight: '1.6', color: '#343a40' } },
+              armed ? t('continuePromptArmed') : t('continuePromptBody')),
+            h('div', { style: { marginTop: '16px', display: 'flex', alignItems: 'center', gap: '8px' } },
+              h('button', {
+                type: 'button',
+                style: Object.assign({}, CONTINUE_BTN, { color: '#2f9e44' }),
+                onClick: _armAndClose,
+              }, t('continuePromptEnable')),
+              h('button', {
+                type: 'button',
+                style: Object.assign({}, CONTINUE_BTN, { color: '#868e96' }),
+                onClick: _declineAndClose,
+              }, t('continuePromptDecline')),
+            ),
+          ),
+        ),
+      )
+    }
+
     /** React component: the per-monitor configuration popup. */
     function MonitorConfigModal(props) {
       var monitor = props.monitor
@@ -4062,9 +4412,9 @@ var _PREFS_MAX_RETRIES = 8
     // ═══════════════════════════════════════════════════════════════════════
     //#region Monitor toggle helpers ──────────────────────────────────────────
 
-    /** Check whether dock-flash's system-alerts master toggle is ON. */
+    /** Check whether dsh-flash's system-alerts master toggle is ON. */
     function _getAlertsOn() {
-      try { return localStorage.getItem('dock-flash:system-alerts') !== '0' } catch (_) { return true }
+      try { return localStorage.getItem('dsh-flash:system-alerts') !== '0' } catch (_) { return true }
     }
 
     var TOGGLE_KEY = 'dsh-flash-ctx-mon:monitor-context'
@@ -4113,6 +4463,24 @@ var _PREFS_MAX_RETRIES = 8
 
       async _applyInner(ctx) {
         _prefCtx = ctx
+
+        // 0. Point the continue-prompt bridge at this module's React renderers
+        //    so a "continue" message can mount the modal whenever the browser
+        //    UI is live. Cleared on dispose so a dead renderer is never called.
+        _continuePromptBridge.handler = openContinuePrompt
+        _continuePromptPending = null
+
+        // 0b. Wire the resident flash-icon indicator into the auto-retry view
+        //     bridge. Every _publishAutoRetryView() → store.notify(view) mirrors
+        //     the state onto the <html> root so the cross-plugin stylesheet can
+        //     paint the glow; cleared on dispose. (Contract in §6: the overlay /
+        //     UI layer owns DOM, the data layer only notifies this object.)
+        _autoRetryStore = { notify: _syncAutoRetryDomIndicator }
+        // Prime immediately: an already-armed session should light the icon
+        // before the first fresh publish rolls in.
+        if (_activeTokenSource && typeof _activeTokenSource.getAutoRetryView === 'function') {
+          try { _syncAutoRetryDomIndicator(_activeTokenSource.getAutoRetryView()) } catch (_) {}
+        }
 
         // 1. Load ctx-mon preferences from the 'dsh-flash-ctx-mon' settings namespace
         loadCtxPrefs(ctx).then(function (ok) {
@@ -4251,6 +4619,11 @@ var _PREFS_MAX_RETRIES = 8
 
       dispose() {
         closeMonitorConfig()
+        closeContinuePrompt()
+        _continuePromptBridge.handler = null
+        _continuePromptPending = null
+        _clearAutoRetryDomIndicator()
+        _autoRetryStore = null
       },
     }
     return client

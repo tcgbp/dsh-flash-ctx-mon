@@ -45,7 +45,7 @@ Apache-2.0
 
 开关属性：`type: 'toggle'`、`group: 'system'`、`cluster: 'system-alerts'`、`order: 59`、
 `icon: 'message'`，外加一个**配置**按钮。它的可见性跟随 `dsh-flash` 的
-`dock-flash:system-alerts` 总开关 —— 告警注册表关掉之后，这个开关没有东西可驱动。它故意
+`dsh-flash:system-alerts` 总开关 —— 告警注册表关掉之后，这个开关没有东西可驱动。它故意
 **不带 `subtitle`**：过去印在行上的 "模型 · 12%" 实时读数，现在就在「配置」按钮打开的
 面板第一屏。
 

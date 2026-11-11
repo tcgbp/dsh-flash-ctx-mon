@@ -50,7 +50,7 @@ all of it in the browser.
 
 Switch properties: `type: 'toggle'`, `group: 'system'`, `cluster: 'system-alerts'`,
 `order: 59`, `icon: 'message'`, plus a **Configure** button. Its visibility follows
-`dsh-flash`'s `dock-flash:system-alerts` master toggle — with the alert registry switched
+`dsh-flash`'s `dsh-flash:system-alerts` master toggle — with the alert registry switched
 off there is nothing for this switch to drive. It deliberately carries **no `subtitle`**:
 the live "model · 12%" readout it used to print on the row is already the first thing in
 the panel the Configure button opens.
