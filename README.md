@@ -44,7 +44,7 @@ all of it in the browser.
 
 | Registration | Through |
 | --- | --- |
-| Alert provider `dsh-flash-ctx-mon:context-alert` | `ctx.get('dockFlashAlerts').registerProvider()` |
+| Alert provider `dsh-flash-ctx-mon:context-alert` | `ctx.get('dshFlashAlerts').registerProvider()` |
 | Panel switch `dsh-flash-ctx-mon:monitor-context` | `ctx.get('quickControl').registerSwitch()` |
 | Session skills chip `dsh-flash-ctx-mon-skills` | `ctx.inject(['slots'])` → `conversation.session.header.actions`, rendered onto the session's tab strip |
 
@@ -56,8 +56,8 @@ the live "model · 12%" readout it used to print on the row is already the first
 the panel the Configure button opens.
 
 > **Dual discovery, plus a fallback poll.** `ctx.get('quickControl')` /
-> `ctx.get('dockFlashAlerts')` resolve asynchronously, so registration has three routes:
-> the `dock-flash:ready` event (`dsh-flash` loaded after us), a synchronous `ctx.get()`
+> `ctx.get('dshFlashAlerts')` resolve asynchronously, so registration has three routes:
+> the `dsh-flash:ready` event (`dsh-flash` loaded after us), a synchronous `ctx.get()`
 > check (it loaded before us), and a fallback poll of up to 15 attempts 200 ms apart.
 > The first to succeed sets `_registered`, so nothing registers twice.
 
@@ -181,7 +181,7 @@ with the context monitor switched off.
 | Package | Type | Purpose |
 | --- | --- | --- |
 | `@deepseek-ai/cordis` | peer | the plugin framework |
-| `dsh-flash` `>=1.0.0-0 <2.0.0-0` | peer | supplies the `quickControl` and `dockFlashAlerts` services and the `dock-flash:ready` event |
+| `dsh-flash` `>=1.0.0-0 <2.0.0-0` | peer | supplies the `quickControl` and `dshFlashAlerts` services and the `dsh-flash:ready` event |
 | `dock-base` `>=0.1.2-0 <1.0.0-0 \|\| >=0.2.0-0 <1.0.0-0` | peer, optional | workbench mode only |
 | `@deepseek-ai/schemastery` | dependency | the settings schema (`volatile()`) |
 
@@ -197,7 +197,7 @@ dsh plugin --profile <profile> add dsh-flash-ctx-mon
 ```
 
 Requires **`dsh-flash` ≥ 1.0** — it supplies the `quickControl` and
-`dockFlashAlerts` services and the `dock-flash:ready` event, and the 1.x line satisfies it.
+`dshFlashAlerts` services and the `dsh-flash:ready` event, and the 1.x line satisfies it.
 Restart DSH after installing.
 
 `cordis.patch.yml` inserts the host row. Its `name` is a **package name**, resolved

@@ -39,7 +39,7 @@ Apache-2.0
 
 | 注册项 | 经由 |
 | --- | --- |
-| 告警提供者 `dsh-flash-ctx-mon:context-alert` | `ctx.get('dockFlashAlerts').registerProvider()` |
+| 告警提供者 `dsh-flash-ctx-mon:context-alert` | `ctx.get('dshFlashAlerts').registerProvider()` |
 | 面板开关 `dsh-flash-ctx-mon:monitor-context` | `ctx.get('quickControl').registerSwitch()` |
 | 会话技能芯片 `dsh-flash-ctx-mon-skills` | `ctx.inject(['slots'])` → `conversation.session.header.actions`，实际渲染在会话标签栏上 |
 
@@ -49,8 +49,8 @@ Apache-2.0
 **不带 `subtitle`**：过去印在行上的 "模型 · 12%" 实时读数，现在就在「配置」按钮打开的
 面板第一屏。
 
-> **双路发现，外加兜底轮询。** `ctx.get('quickControl')` / `ctx.get('dockFlashAlerts')` 是
-> 异步解析的，所以注册有三条路径：`dock-flash:ready` 事件（`dsh-flash` 比我们晚加载）、同步
+> **双路发现，外加兜底轮询。** `ctx.get('quickControl')` / `ctx.get('dshFlashAlerts')` 是
+> 异步解析的，所以注册有三条路径：`dsh-flash:ready` 事件（`dsh-flash` 比我们晚加载）、同步
 > `ctx.get()` 检查（它比我们早加载）、以及最多 15 次、每次间隔 200 ms 的兜底轮询。先成功
 > 的那个会置上 `_registered`，所以不会重复注册。
 
@@ -158,7 +158,7 @@ Apache-2.0
 | 包 | 类型 | 用途 |
 | --- | --- | --- |
 | `@deepseek-ai/cordis` | peer | 插件框架 |
-| `dsh-flash` `>=1.0.0-0 <2.0.0-0` | peer | 提供 `quickControl`、`dockFlashAlerts` 服务与 `dock-flash:ready` 事件 |
+| `dsh-flash` `>=1.0.0-0 <2.0.0-0` | peer | 提供 `quickControl`、`dshFlashAlerts` 服务与 `dsh-flash:ready` 事件 |
 | `dock-base` `>=0.1.2-0 <1.0.0-0 \|\| >=0.2.0-0 <1.0.0-0` | peer，可选 | 仅 workbench 模式 |
 | `@deepseek-ai/schemastery` | dependency | 设置 schema（`volatile()`） |
 
@@ -172,7 +172,7 @@ Apache-2.0
 dsh plugin --profile <profile> add dsh-flash-ctx-mon
 ```
 
-需要 **`dsh-flash` ≥ 1.0**：它提供 `quickControl`、`dockFlashAlerts` 服务与 `dock-flash:ready` 事件，1.x 线都满足。安装后请重启 DSH。
+需要 **`dsh-flash` ≥ 1.0**：它提供 `quickControl`、`dshFlashAlerts` 服务与 `dsh-flash:ready` 事件，1.x 线都满足。安装后请重启 DSH。
 
 `cordis.patch.yml` 负责插入宿主行。它的 `name` 是**包名**，经 profile 的 `node_modules`
 解析 —— **绝不是相对路径**。

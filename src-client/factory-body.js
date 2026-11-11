@@ -4493,13 +4493,13 @@ var _PREFS_MAX_RETRIES = 8
               reg.notifyChange(TOGGLE_KEY)
             }
           } catch (_) {}
-          var alertReg = ctx.get && ctx.get('dockFlashAlerts')
+          var alertReg = ctx.get && ctx.get('dshFlashAlerts')
           if (alertReg) {
             try { alertReg.setProviderEnabled(PROVIDER_ID, lsOn) } catch (_) {}
           }
         })
 
-        // 2. Register with dock-flash's quickControl and dockFlashAlerts services.
+        // 2. Register with dock-flash's quickControl and dshFlashAlerts services.
         var _registered = false
 
         function _registerServices(registry, alertRegistry) {
@@ -4587,19 +4587,19 @@ var _PREFS_MAX_RETRIES = 8
           }, 'dsh-flash-ctx-mon: session skills chip')
         })
 
-        // Passive: listen for dock-flash:ready event
+        // Passive: listen for dsh-flash:ready event
         try {
-          ctx.on('dock-flash:ready', function (payload) {
-            console.log('[dsh-flash-ctx-mon] dock-flash:ready event received — quickControl=' + !!(payload && payload.quickControl) + ', alerts=' + !!(payload && payload.alerts))
+          ctx.on('dsh-flash:ready', function (payload) {
+            console.log('[dsh-flash-ctx-mon] dsh-flash:ready event received — quickControl=' + !!(payload && payload.quickControl) + ', alerts=' + !!(payload && payload.alerts))
             _registerServices(payload.quickControl, payload.alerts)
           })
         } catch (e) {
-          console.warn('[dsh-flash-ctx-mon] ctx.on("dock-flash:ready") failed:', e)
+          console.warn('[dsh-flash-ctx-mon] ctx.on("dsh-flash:ready") failed:', e)
         }
 
         // Active: check if dock-flash already loaded
         var registry = ctx.get('quickControl')
-        var alertRegistry = ctx.get('dockFlashAlerts')
+        var alertRegistry = ctx.get('dshFlashAlerts')
         console.log('[dsh-flash-ctx-mon] active check — quickControl=' + !!registry + ', alerts=' + !!alertRegistry)
         if (registry && alertRegistry) _registerServices(registry, alertRegistry)
 
@@ -4609,7 +4609,7 @@ var _PREFS_MAX_RETRIES = 8
           function _retryGet() {
             if (_registered) return
             var r = ctx.get('quickControl')
-            var a = ctx.get('dockFlashAlerts')
+            var a = ctx.get('dshFlashAlerts')
             if (r && a) { _registerServices(r, a); return }
             if (++_retryCount < 15) setTimeout(_retryGet, 200)
           }

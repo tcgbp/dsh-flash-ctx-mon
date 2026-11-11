@@ -19,7 +19,7 @@
 
 - **ctx-mon** 的 `SessionEventTokenSource` 已经订阅会话事件、读 `turn/end`，并且**已经在处理
   `reason.kind === 'error'`**（用于上下文用尽错误解析）。它注册告警提供者走
-  `ctx.get('dockFlashAlerts')`、面板开关走 `ctx.get('quickControl')`——这正是 dsh-flash 伴生插件的
+  `ctx.get('dshFlashAlerts')`、面板开关走 `ctx.get('quickControl')`——这正是 dsh-flash 伴生插件的
   集成面。
 - **auto-retry** 的 `AutoRetryRunner` 在 `turn/end` 命中 `error / interrupted / max-tokens` 后补发
   「继续」，带宽限期、冷却、连续上限、指数退避、自身回显识别、启动扫描与停止按钮。
