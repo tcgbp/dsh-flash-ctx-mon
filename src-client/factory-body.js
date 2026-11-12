@@ -59,6 +59,13 @@ import {
   retryAttemptKey,
   requestIdForAttempt,
 } from './auto-retry.js'
+import {
+  makeLedger,
+  noteOpenTurn,
+  noteClosedTurn,
+  clearOpenTurns,
+  unsettledTurnsAt,
+} from './unfinished-turn.js'
 
 window.__ModuleLoader__.load({
   id: 'dsh-flash-ctx-mon',
@@ -1045,6 +1052,100 @@ var _PREFS_MAX_RETRIES = 8
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // Unsettled-turn indicator on the resident flash icon (§8, form ①).
+    //
+    // Mirrors the auto-retry indicator above, but for the WATCHDOG path:
+    // a session whose turn STARTED but never produced a closing turn/end, so it
+    // is "unsettled yet stopped" (docs/detecting-unfinished-session.zh-CN.md).
+    //
+    // It uses the SAME additive, DOM-light mechanism: the token-source ledger
+    // publishes an unsettled view through _unsettledStore, we stamp the total
+    // unsettled count onto <html> and onto dsh-flash's trigger button(s), and
+    // one lazily-injected stylesheet paints a RED COUNT pill (live-updating,
+    // non-pulsing — a reminder, not a call to action) on the icon. Publish
+    // while the bridge is null is a no-op; the overlay reads snapshots directly.
+    //
+    // Reminder-only, never auto-continue: form ① may signal a host anomaly and
+    // blindly re-prompting would repeatedly fail and bill tokens.
+    var _unsettledStore = null
+    var _unsettledIndicatorStyle = null
+
+    function _ensureUnsettledIndicatorStyle() {
+      if (_unsettledIndicatorStyle || typeof document === 'undefined' || !document.head) return
+      try {
+        var style = document.createElement('style')
+        style.id = 'ctx-mon-unsettled-indicator'
+        style.textContent = [
+          // Red count pill top-right of the flash icon — a steady reminder that
+          // some session(s) are left open (unsettled). Driven purely by the
+          // data-count attribute we stamp onto the button itself.
+          'html[data-ctx-mon-unsettled] [data-dsh-flash-trigger][data-ctx-mon-unsettled-count]::after{' +
+            'content:attr(data-ctx-mon-unsettled-count);' +
+            'position:absolute;top:-5px;right:-5px;min-width:15px;height:15px;' +
+            'padding:0 4px;border-radius:8px;font-size:9px;line-height:15px;' +
+            'text-align:center;font-weight:700;color:#fff;' +
+            'background:rgba(224,49,49,.95);box-shadow:0 0 0 1px rgba(255,255,255,.55);' +
+            'z-index:1;' +
+          '}',
+        ].join('\n')
+        document.head.appendChild(style)
+        _unsettledIndicatorStyle = style
+      } catch (e) {
+        console.error('[dsh-flash-ctx-mon] failed to inject unsettled indicator style:', e)
+      }
+    }
+
+    /** Mirror an unsettled view onto the <html> root + dsh-flash trigger
+     *  button(s) so the stylesheet can paint the red count pill. A count of 0
+     *  (or a null view) clears everything. Pure UI concern; never continues. */
+    function _syncUnsettledDomIndicator(view) {
+      if (typeof document === 'undefined' || !document.documentElement) return
+      var root = document.documentElement
+      var list = view && view.unsettled
+      var count = list && list.length ? list.length : 0
+      if (count < 1) {
+        root.removeAttribute('data-ctx-mon-unsettled')
+        try {
+          var dead = document.querySelectorAll('[data-ctx-mon-unsettled-count]')
+          for (var d = 0; d < dead.length; d++) {
+            dead[d].removeAttribute('data-ctx-mon-unsettled-count')
+            dead[d].removeAttribute('title')
+          }
+        } catch (_) {}
+        return
+      }
+      _ensureUnsettledIndicatorStyle()
+      root.setAttribute('data-ctx-mon-unsettled', String(count))
+      var hint = String(count) + ' session(s) left unsettled (turn started, never ended)'
+      try {
+        var btns = document.querySelectorAll('[data-dsh-flash-trigger]')
+        for (var i = 0; i < btns.length; i++) {
+          btns[i].setAttribute('data-ctx-mon-unsettled-count', String(count))
+          btns[i].setAttribute('title', hint)
+        }
+      } catch (_) {}
+    }
+
+    /** Remove the injected unsettled stylesheet and all its marks. */
+    function _clearUnsettledDomIndicator() {
+      if (_unsettledIndicatorStyle) {
+        try { _unsettledIndicatorStyle.remove() } catch (_) {}
+        _unsettledIndicatorStyle = null
+      }
+      if (typeof document !== 'undefined' && document.documentElement) {
+        var root = document.documentElement
+        root.removeAttribute('data-ctx-mon-unsettled')
+      }
+      try {
+        var btns = document.querySelectorAll('[data-ctx-mon-unsettled-count]')
+        for (var i = 0; i < btns.length; i++) {
+          btns[i].removeAttribute('data-ctx-mon-unsettled-count')
+          btns[i].removeAttribute('title')
+        }
+      } catch (_) {}
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // "Continue → offer auto-retry" bridge (§7 of the design).
     //
     // When the user types a bare continue word (「继续」/ "continue") as a HUMAN
@@ -1120,6 +1221,20 @@ var _PREFS_MAX_RETRIES = 8
       var _retryBySession = Object.create(null)  // sessionId -> runner record
       var _retryRequestIdCache = new Map()       // per-session attempt keys -> requestIds (idempotent re-send)
       var _retryTimer = null                     // single emission timer (one-at-a-time guard)
+
+      // ─────────────────────────────────────────────────────────────────────
+      // Open-turn ledger & watchdog (form ① detection — "turn started but no
+      // closing turn/end ever arrived" — docs/detecting-unfinished-session.zh-CN.md).
+      //
+      // The LEDGER records each turn/start on the tracked session and retires
+      // the OLDEST open turn when a turn/end finally arrives (FIFO, isolated
+      // per session id). It only FLAGS "unsettled yet stopped" residuals; it
+      // never auto-continues them — per the module contract a fresh notice is
+      // reminder-only, because form ① may signal a host anomaly and blindly
+      // re-prompting would repeatedly fail and bill tokens. All transitions
+      // delegate to the pure helpers in ./unfinished-turn.js so this block
+      // stays thin and directly unit-tested.
+      var _openTurnLedger = makeLedger()
 
       // ─ AutoRetryRunner — the inline stateful core (§6 of the design) ──────
       // All decisions are delegated to the pure helpers in ./auto-retry.js so
@@ -1382,6 +1497,23 @@ var _PREFS_MAX_RETRIES = 8
         }
       }
 
+      /** Snapshot of the open-turn ledger for the overlay / indicator, shaped
+       *  for the watchdog. `unsettled` is the list of sessions whose OLDEST
+       *  open turn has been silent for the guard grace. Reminder-only. */
+      function _makeUnsettledView() {
+        return {
+          unsettled: unsettledTurnsAt(_openTurnLedger, Date.now(), 60000),
+        }
+      }
+
+      /** Publish the unsettled view through the optional module-level bridge so
+       *  the header/resident indicator re-renders without racing setup. */
+      function _publishUnsettledView() {
+        if (_unsettledStore && typeof _unsettledStore.notify === 'function') {
+          try { _unsettledStore.notify(_makeUnsettledView()) } catch (_) {}
+        }
+      }
+
       /** Normalize a continue-word for matching: trim, lowercase, and collapse
        *  any internal whitespace so " 继续 " and "CONTINUE" both match. */
       function _normalizeContinue(text) {
@@ -1584,12 +1716,42 @@ var _PREFS_MAX_RETRIES = 8
             if (seq >= 0 && seq > _lastProcessedSeq) _lastProcessedSeq = seq
           }
 
+          // Track open turns so we can later flag a turn that STARTED but never
+          // produced a closing turn/end (form ① of the unfinished-session doc).
+          // The ledger is per-session isolated; the wall-clock is the event's
+          // own time (replay-safe) with Date.now() as a defensive fallback.
+          if (ev.type === 'turn/start') {
+            try {
+              _openTurnLedger = noteOpenTurn(_openTurnLedger, {
+                sessionId: _sessionId,
+                openedAt: typeof ev.time === 'number' ? ev.time : Date.now(),
+                tokenSourceId: 'session-event',
+              })
+            } catch (e) {
+              // Non-fatal: malformed turn/start payload
+            }
+            if (seq >= 0 && seq > _lastProcessedSeq) _lastProcessedSeq = seq
+            _publishUnsettledView()
+          }
+
           // Detect turn/end errors (e.g. "上下文超限" / CONTEXT_WINDOW_EXCEEDED)
           // and extract the real context window from the error message. This
           // extraction path is independent from — and coexists with — the
           // auto-continue logic below.
           if (ev.type === 'turn/end') {
             var endData = ev.data
+            // A turn/end settles the OLDEST open residual for this session
+            // (FIFO, matching DSH's sequential per-session turn resolution).
+            try {
+              _openTurnLedger = noteClosedTurn(_openTurnLedger, {
+                sessionId: _sessionId,
+                closedAt: typeof ev.time === 'number' ? ev.time : Date.now(),
+                reasonKind: (endData && endData.reason && endData.reason.kind) || null,
+              })
+            } catch (e) {
+              // Non-fatal: malformed turn/end payload
+            }
+            _publishUnsettledView()
             if (endData && endData.reason) {
               var reason = endData.reason
               if (reason.kind === 'error') {
@@ -1671,6 +1833,10 @@ var _PREFS_MAX_RETRIES = 8
             _model = null
             _contextWindow = null
             _contextWindowModel = null
+            // Re-account the CURRENT session's open-turn ledger from the fresh
+            // history. Other sessions' ledgers are left untouched (isolation).
+            _openTurnLedger = clearOpenTurns(_openTurnLedger, _sessionId)
+            _publishUnsettledView()
           }
           _processEntries(win.entries)
         } catch (e) {
@@ -1714,6 +1880,9 @@ var _PREFS_MAX_RETRIES = 8
         // the glow immediately (regression: the indicator was lost on switch-back
         // because switching sessions never re-published the view).
         _publishAutoRetryView()
+        // Same for the watchdog badge: any bind re-derives the unsettled set
+        // (grace elapsed while unbound), so the red count stays live.
+        _publishUnsettledView()
       }
 
       /** Find a session id that has a live materialized binding. */
@@ -1904,6 +2073,29 @@ var _PREFS_MAX_RETRIES = 8
           armAutoRetry: _armAutoRetry,
           disarmAutoRetry: _disarmAutoRetry,
           getAutoRetryView: _makeAutoRetryView,
+
+          // ── Watchdog (unfinished-turn) public API ─────────────────────────
+          // Form ① detection surface (docs/detecting-unfinished-session.zh-CN.md
+          // §3.2). The ledger this token source feeds on turn/start and
+          // turn/end lives in this same closure, so these read/write the SAME
+          // records the event sink updates — unlike auto-retry's per-session
+          // arm state, the open-turn ledger spans sessions, so the query
+          // returns every currently-unsettled session, not just the tracked one.
+          //
+          // Both are PURE surfaces: getUnsettledTurns only COMPUTES the set to
+          // REMIND about; dismissOpenTurns is the acknowledged-by-human reset
+          // hook the overlay calls. Neither ever auto-continues anything.
+          getUnsettledTurns: function (nowMs, graceMs) {
+            var now = typeof nowMs === 'number' ? nowMs : Date.now()
+            var grace = typeof graceMs === 'number' ? graceMs : 60000
+            return unsettledTurnsAt(_openTurnLedger, now, grace)
+          },
+
+          dismissOpenTurns: function (sessionId) {
+            _openTurnLedger = clearOpenTurns(_openTurnLedger, sessionId)
+            _publishUnsettledView()
+            return _openTurnLedger
+          },
       }
     }
 
@@ -4482,6 +4674,14 @@ var _PREFS_MAX_RETRIES = 8
           try { _syncAutoRetryDomIndicator(_activeTokenSource.getAutoRetryView()) } catch (_) {}
         }
 
+        // 0c. Wire the watchdog badge into the unsettled view bridge, same
+        //     mechanism as 0b. Reminder-only: it paints a red count, never
+        //     a continue. Cleared on dispose.
+        _unsettledStore = { notify: _syncUnsettledDomIndicator }
+        if (_activeTokenSource && typeof _activeTokenSource.getUnsettledTurns === 'function') {
+          try { _syncUnsettledDomIndicator(_activeTokenSource.getUnsettledTurns()) } catch (_) {}
+        }
+
         // 1. Load ctx-mon preferences from the 'dsh-flash-ctx-mon' settings namespace
         loadCtxPrefs(ctx).then(function (ok) {
           // Sync alert providers with the localStorage-backed state.
@@ -4624,6 +4824,8 @@ var _PREFS_MAX_RETRIES = 8
         _continuePromptPending = null
         _clearAutoRetryDomIndicator()
         _autoRetryStore = null
+        _clearUnsettledDomIndicator()
+        _unsettledStore = null
       },
     }
     return client
