@@ -35,6 +35,28 @@ describe('isRetryableEnd', () => {
     expect(isRetryableEnd({})).toBe(false)
     expect(isRetryableEnd({ kind: '' })).toBe(false)
   })
+
+  // The split the user asked for: process/environment hard interruption
+  // (→ session-level `interrupted` turn/end) MUST auto-continue, while a
+  // user clicking Stop / new input taking over the turn (→ session-level
+  // `aborted` turn/end carrying an `AgentCancelCause`) must NOT. DSH's
+  // TurnEndReasonMap already spells these as distinct `reason.kind` values,
+  // so the retryable whitelist alone implements the whole distinction —
+  // `aborted` is never in RETRYABLE_END_REASONS.
+  it('auto-continues on environment/process interruption (kind "interrupted")', () => {
+    // Crash-orphaned turn closed after the fact / live-recovery closer.
+    expect(isRetryableEnd({ kind: 'interrupted' })).toBe(true)
+  })
+
+  it('never auto-continues on a user stop / new-input takeover (kind "aborted")', () => {
+    // `aborted` groups all AgentCancelCause origins (user, parent, hook,
+    // disposed) and is explicitly excluded from the retryable whitelist.
+    expect(isRetryableEnd({ kind: 'aborted' })).toBe(false)
+    expect(isRetryableEnd({ kind: 'aborted', reason: { kind: 'user' } })).toBe(false)
+    expect(isRetryableEnd({ kind: 'aborted', reason: { kind: 'parent' } })).toBe(false)
+    expect(isRetryableEnd({ kind: 'aborted', reason: { kind: 'hook', reason: 'test' } })).toBe(false)
+    expect(isRetryableEnd({ kind: 'aborted', reason: { kind: 'disposed' } })).toBe(false)
+  })
 })
 
 describe('backoffDelayMs', () => {

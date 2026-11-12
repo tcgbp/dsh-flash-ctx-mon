@@ -964,12 +964,12 @@ var _PREFS_MAX_RETRIES = 8
           'html[data-ctx-mon-autoretry=paused] [data-dsh-flash-trigger]{' +
             'color:rgba(224,49,49,1) !important;' +
           '}',
-          // Numeric attempt badge (top-left pill) driven by a data attribute we
+          // Numeric attempt badge (bottom-left pill) driven by a data attribute we
           // put on the button itself; it inherits the state color. Hidden by the
           // lack of the data attribute (stopped), so no matching element is shown.
           'html[data-ctx-mon-autoretry] [data-dsh-flash-trigger][data-ctx-mon-autoretry-attempt]::after{' +
             'content:attr(data-ctx-mon-autoretry-attempt);' +
-            'position:absolute;top:-5px;left:-5px;min-width:15px;height:15px;' +
+            'position:absolute;bottom:-5px;left:-5px;min-width:15px;height:15px;' +
             'padding:0 4px;border-radius:8px;font-size:9px;line-height:15px;' +
             'text-align:center;font-weight:700;color:#fff;' +
             'z-index:1;' +
@@ -1052,97 +1052,59 @@ var _PREFS_MAX_RETRIES = 8
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Unsettled-turn indicator on the resident flash icon (§8, form ①).
+    // Open-turn ledger backing the auto-continue path (§8, form ①).
     //
-    // Mirrors the auto-retry indicator above, but for the WATCHDOG path:
-    // a session whose turn STARTED but never produced a closing turn/end, so it
-    // is "unsettled yet stopped" (docs/detecting-unfinished-session.zh-CN.md).
+    // A session whose turn STARTED but then closed WITHOUT a user-cancel
+    // (i.e. it ended via `interrupted` / `error` / `max-tokens`, NOT `aborted`)
+    // is eligible for an automatic one-time continue ("方案 A"). The ledger
+    // below records open turns from turn/start → turn/end so we can tell an
+    // interrupted-but-closed turn from one that is merely still running.
+    // docs/detecting-unfinished-session.zh-CN.md.
     //
-    // It uses the SAME additive, DOM-light mechanism: the token-source ledger
-    // publishes an unsettled view through _unsettledStore, we stamp the total
-    // unsettled count onto <html> and onto dsh-flash's trigger button(s), and
-    // one lazily-injected stylesheet paints a RED COUNT pill (live-updating,
-    // non-pulsing — a reminder, not a call to action) on the icon. Publish
-    // while the bridge is null is a no-op; the overlay reads snapshots directly.
-    //
-    // Reminder-only, never auto-continue: form ① may signal a host anomaly and
-    // blindly re-prompting would repeatedly fail and bill tokens.
+    // The red count-pill reminder UI has been REMOVED per decision: this bridge
+    // still exists as a data path, but it never paints a badge or pill and only
+    // ever contributes to deciding whether to auto-continue. Publish while the
+    // bridge is null is a no-op.
     var _unsettledStore = null
     var _unsettledIndicatorStyle = null
 
+    /** The unsettled (open-turn) reminder UI has been REMOVED per decision
+     *  (compact-summary): no red count pill, no badge, no title tooltip is
+     *  painted anywhere. The overlay remains a pure continuation primitive —
+     *  it never surfaces a "N turns left open" reminder, because a bare
+     *  reminder with no auto-continue merely tells the human about an
+     *  unsettled bill and invites a wasted "继续" click. The three helpers
+     *  below are kept ONLY as idempotent clean-up so any stale marks left on
+     *  <html> / buttons by an older installed version are swept away; they
+     *  never create a style element nor stamp a count. `_unsettledIndicatorStyle`
+     *  stays null forever. */
     function _ensureUnsettledIndicatorStyle() {
-      if (_unsettledIndicatorStyle || typeof document === 'undefined' || !document.head) return
-      try {
-        var style = document.createElement('style')
-        style.id = 'ctx-mon-unsettled-indicator'
-        style.textContent = [
-          // Red count pill top-right of the flash icon — a steady reminder that
-          // some session(s) are left open (unsettled). Driven purely by the
-          // data-count attribute we stamp onto the button itself.
-          'html[data-ctx-mon-unsettled] [data-dsh-flash-trigger][data-ctx-mon-unsettled-count]::after{' +
-            'content:attr(data-ctx-mon-unsettled-count);' +
-            'position:absolute;top:-5px;right:-5px;min-width:15px;height:15px;' +
-            'padding:0 4px;border-radius:8px;font-size:9px;line-height:15px;' +
-            'text-align:center;font-weight:700;color:#fff;' +
-            'background:rgba(224,49,49,.95);box-shadow:0 0 0 1px rgba(255,255,255,.55);' +
-            'z-index:1;' +
-          '}',
-        ].join('\n')
-        document.head.appendChild(style)
-        _unsettledIndicatorStyle = style
-      } catch (e) {
-        console.error('[dsh-flash-ctx-mon] failed to inject unsettled indicator style:', e)
-      }
+      /* Intentionally inert: the red pill stylesheet is deleted (§§decision). */
     }
 
-    /** Mirror an unsettled view onto the <html> root + dsh-flash trigger
-     *  button(s) so the stylesheet can paint the red count pill. A count of 0
-     *  (or a null view) clears everything. Pure UI concern; never continues. */
+    /** No-op mirror. Kept for disposal symmetry; never paints or reads.
+     *  Callers (install/prime/event loops) must not depend on DOM effects. */
     function _syncUnsettledDomIndicator(view) {
-      if (typeof document === 'undefined' || !document.documentElement) return
-      var root = document.documentElement
-      var list = view && view.unsettled
-      var count = list && list.length ? list.length : 0
-      if (count < 1) {
-        root.removeAttribute('data-ctx-mon-unsettled')
-        try {
-          var dead = document.querySelectorAll('[data-ctx-mon-unsettled-count]')
-          for (var d = 0; d < dead.length; d++) {
-            dead[d].removeAttribute('data-ctx-mon-unsettled-count')
-            dead[d].removeAttribute('title')
-          }
-        } catch (_) {}
-        return
-      }
-      _ensureUnsettledIndicatorStyle()
-      root.setAttribute('data-ctx-mon-unsettled', String(count))
-      var hint = String(count) + ' session(s) left unsettled (turn started, never ended)'
-      try {
-        var btns = document.querySelectorAll('[data-dsh-flash-trigger]')
-        for (var i = 0; i < btns.length; i++) {
-          btns[i].setAttribute('data-ctx-mon-unsettled-count', String(count))
-          btns[i].setAttribute('title', hint)
-        }
-      } catch (_) {}
+      /* Inert: no DOM indicator is ever painted. */
     }
 
-    /** Remove the injected unsettled stylesheet and all its marks. */
+    /** Sweep any legacy `data-ctx-mon-unsettled*` marks left by older builds. */
     function _clearUnsettledDomIndicator() {
       if (_unsettledIndicatorStyle) {
         try { _unsettledIndicatorStyle.remove() } catch (_) {}
         _unsettledIndicatorStyle = null
       }
       if (typeof document !== 'undefined' && document.documentElement) {
-        var root = document.documentElement
-        root.removeAttribute('data-ctx-mon-unsettled')
+        try {
+          var root = document.documentElement
+          root.removeAttribute('data-ctx-mon-unsettled')
+          var dead = document.querySelectorAll('[data-ctx-mon-unsettled-count]')
+          for (var i = 0; i < dead.length; i++) {
+            dead[i].removeAttribute('data-ctx-mon-unsettled-count')
+            dead[i].removeAttribute('title')
+          }
+        } catch (_) {}
       }
-      try {
-        var btns = document.querySelectorAll('[data-ctx-mon-unsettled-count]')
-        for (var i = 0; i < btns.length; i++) {
-          btns[i].removeAttribute('data-ctx-mon-unsettled-count')
-          btns[i].removeAttribute('title')
-        }
-      } catch (_) {}
     }
 
     // ─────────────────────────────────────────────────────────────────────────
