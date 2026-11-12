@@ -69,3 +69,23 @@
 - 通读覆盖：L1-160、L161-560、L561-890、L891-1220、L1221-1780、L1781-2330、L2330-2731、L2732-2954、L2955-3084、L3085-3199、L3200-3279、L3286-3668、L3678-3730、L3730-4234、L4063-4097。
 - R.* L2318-2325、E.prominent L2326-2328、S.* L2330 起；overlay 组件（hostSkillsChip/SkillsTabChip/SessionSkillsSection）位于 L3673+。
 - 最终工作区状态以 `git status` 实时核查为准（存在用户并发写入）。
+
+---
+
+## 后续任务：continue-offer 改用 dsh-flash info 告警弹窗（2026-11-12）
+
+**目标**：按用户要求把「是否开启自动继续」的询问从自定义 React modal 换成复用 `dshFlashAlerts` 注册表的**信息级告警**弹窗。
+
+**方案（用户已确认）**：provider 注入 —— context alert 提供者的 `poll()` 在读到一个对本会话、未武装的 pending continue-offer 时，push 一条 info 告警（id `ctx-auto-continue-offer-<at>`，🔁，dismissible），复用 dsh-flash 的 toast/detail 弹窗；两个 action 按钮「开启自动继续」「暂不」完成选择后清 pending 并立即 re-poll 撤下告警。
+
+**已完成**
+- [x] `createSessionContextProvider.poll()` 注入 offer 告警及两个 action（enable→`armAutoRetry()`；decline→记录冷却 `_continuePromptAt[sid]=now`）。
+- [x] 新增闭包辅助 `_flushOfferPoll()`（清 timer + 立即 re-poll）与按引用保存的 bridge handler `_promptHandler`；provider `start()` 安装、`stop()` 按身份清空。
+- [x] token source 暴露 `getSessionId()`；`_reset()` 清空 `_continuePromptPending`（会话切换不泄漏旧 offer）。
+- [x] **完全移除** `ContinuePromptModal` / `CONTINUE_BTN` / `openContinuePrompt` / `closeContinuePrompt` / `_continuePromptRoot` / `_continuePromptHost` 及对应接线（`_applyInner`、`dispose`）。
+- [x] `_maybePromptAutoRetry` guards/冷却语义零改动；bridge/pending 保留为数据层→provider 通道；常驻指示器未动。
+- [x] 三门口令通过：`tsc --noEmit`、`vitest --pool=threads`（80/80）、`build-client.mjs`（bundle 含新逻辑、无已删符号）。
+- [x] 更新 progress.md / CHANGELOG.md；不改用户 ` M` 文件。
+
+**待办**
+- [ ]（如需要）GUI 浏览器验证 info 告警 toast/detail 弹窗实际渲染与「开启/暂不」互动。

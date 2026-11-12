@@ -1,5 +1,45 @@
 # 进度日志
 
+## 会话：2026-11-12（复用 dsh-flash 信息告警弹窗询问「开启自动继续」）
+
+### 当前状态
+- **阶段：** 已实现 —— 自定义 `ContinuePromptModal` 完全移除，改为由 context alert provider 向 `dshFlashAlerts` 注册表发布一条 **info 级告警**（🔁「开启自动重试？」），复用 dsh-flash 自己的 toast/detail 弹窗承接「开启自动继续 / 暂不」选择。三门口令通过。
+
+### 需求与用户确认
+- 用户要求：**复用信息级别告警弹窗来询问用户是否开启自动继续，而不是自定义的弹窗。**
+- 用户通过 `ask_user_question` 确认三项：
+  1. 路线 = 按 provider 注入 info 告警（复用 dsh-flash 现有 toast/detail 弹窗，action 按钮「开启自动继续」「暂不」）。
+  2. 自定义 `ContinuePromptModal` = 完全移除。
+  3. 常驻指示器（armed/paused 状态 + flash 图标开关）= 保留（与询问弹窗是独立功能）。
+
+### 已执行操作（本会话累计）
+- [x] 在 `createSessionContextProvider.poll()` 尾部注入 continue-offer 告警：
+  - id `ctx-auto-continue-offer-<at>`（时间戳后缀 → 每次手动继续独立，dismiss 只影响当次；不记录冷却）。
+  - severity `info`、icon `🔁`、dismissible、title=`continuePromptTitle`、message=`continuePromptBody`。
+  - actions：`auto-continue-enable`（primary，绿色语义）→ `_activeTokenSource.armAutoRetry()` + 清 pending + 立即 re-poll（`{message: continuePromptArmed, close:true}`）；`auto-continue-decline`（「暂不」）→ 记录 `_continuePromptAt[sid]=Date.now()` + 清 pending + 立即 re-poll（`{message:null, close:true}`）。
+  - registry 对 genuinely-new id 才弹 toast，重复 emit 同 id 保持安静。
+- [x] token source 返回对象新增 `getSessionId()`；`_reset()`（每次会话切换/重绑/stop 时执行）内 `_continuePromptPending=null`，杜绝旧会话 pending 泄漏到新会话。
+- [x] provider 内新增 `_flushOfferPoll()`（清 timer + 立即 `poll()` re-emit）与 `_promptHandler`（bridge handler，按引用保存在 `stop()` 中按身份清空）。
+- [x] provider `start()` 安装 `_continuePromptBridge.handler = _promptHandler`（数据层 → provider 的即时刷新通道）；`stop()` 按身份清空。
+- [x] **完全移除** `ContinuePromptModal` 组件、`CONTINUE_BTN`、`openContinuePrompt`、`closeContinuePrompt`、`_continuePromptRoot`/`_continuePromptHost` 声明，及 `_applyInner` 里的 `_continuePromptBridge.handler = openContinuePrompt` 与 `dispose()` 里的 `closeContinuePrompt()`。
+- [x] 语义保留：`_maybePromptAutoRetry` 的 guards（已武装短路 / `_matchesContinueWord` / 按会话冷却 `_continuePromptAt`）与设置 pending 逻辑**零改动**；「暂不」记录冷却、普通 dismiss 不记录冷却的对账保持正确。
+- [x] 保留 `_continuePromptBridge`/`_continuePromptPending`（重定位为数据层 → provider 通道），常驻指示器未动。
+
+### 测试结果（2026-11-12 实测）
+- [x] `npx tsc --noEmit`：exit 0。
+- [x] `npx vitest run --pool=threads`：Test Files 5 passed (5)，**Tests 80 passed (80)**（tokens 12 + skill-detect 11 + ctx-window 15 + auto-retry 26 + unfinished-turn 16）。
+- [x] `node scripts/build-client.mjs`：lib/client.js 重建 exit 0；bundle 含 `ctx-auto-continue-offer` 且无任何已删符号（`openContinuePrompt/closeContinuePrompt/ContinuePromptModal/_continuePromptRoot/_continuePromptHost`）残留。
+
+### 约束遵守（用户红线）
+- 复用 dsh-flash 注册表信息级告警弹窗，不再自造 React modal。
+- `_maybePromptAutoRetry` 语义与冷却对账保持不变；未改动的 ` M` 文件（package.json、README×2、docs/auto-retry-integration-design、docs/tcgbp yml）未触碰。
+- 不设置 `sandbox_permissions`；无破坏性 checkout。
+
+### 待办
+- [ ]（如需要）GUI 浏览器验证 info 告警弹窗实际渲染与续提互动（受鉴权 / 无真实中断会话限制，机器可验证门为上方三项）。
+
+---
+
 ## 会话：2026-11-12（open-turn watchdog / unsettled 指示器）
 
 ### 当前状态

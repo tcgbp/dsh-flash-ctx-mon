@@ -1122,16 +1122,13 @@ var _PREFS_MAX_RETRIES = 8
     // inside a token source so the "don't nag again" state survives a source
     // stop/start cycle (a re-bind on session switch resets a source's own vars).
     var _continuePromptBridge = { handler: null }
-    /** Persist the latest pending offer so a late-mounted UI can still show it. */
+    /** Persist the latest pending offer so the alert provider can surface it as
+     *  an info alert (data-layer → provider channel; see createSessionContextProvider). */
     var _continuePromptPending = null
     /** last-offered timestamp per sessionId, to stop re-nagging. */
     var _continuePromptAt = Object.create(null)
     /** How long to wait before offering again for the same session (ms). */
     var CONTINUE_PROMPT_COOLDOWN_MS = 60000
-    /** Transient React root/host for the continue-prompt modal (mirrors the
-     *  per-modal `_monitorConfigRoot`/`_monitorConfigHost` pattern). */
-    var _continuePromptRoot = null
-    var _continuePromptHost = null
 
     /**
      * SessionEventTokenSource — reads precise token usage from DSH's session
@@ -1815,6 +1812,9 @@ var _PREFS_MAX_RETRIES = 8
         _model = null
         _contextWindow = null
         _contextWindowModel = null
+        // Drop any pending auto-continue offer: it belongs to the session we are
+        // unbinding from, so it must never spill into a newly bound session.
+        _continuePromptPending = null
       }
 
       function _bindToSession() {
@@ -2035,6 +2035,10 @@ var _PREFS_MAX_RETRIES = 8
           armAutoRetry: _armAutoRetry,
           disarmAutoRetry: _disarmAutoRetry,
           getAutoRetryView: _makeAutoRetryView,
+          /** Current bound session id (the session an auto-continue offer belongs
+           *  to). Null when no session is materialized. Used by the alert provider
+           *  to reject a stale continue-offer after a session switch. */
+          getSessionId: function () { return _sessionId },
 
           // ── Watchdog (unfinished-turn) public API ─────────────────────────
           // Form ① detection surface (docs/detecting-unfinished-session.zh-CN.md
@@ -2605,6 +2609,56 @@ var _PREFS_MAX_RETRIES = 8
           }
         }
 
+        // Continue-offer as an info alert: after a human "continue" message in
+        // the CURRENT (still-not-armed) session, the data layer records a
+        // pending offer. Surface it as an info-level alert so dock-flash's own
+        // toast/detail modal handles the yes/not-now choice — no custom modal.
+        // Re-emitted on every poll, but the registry only toasts a genuinely-new
+        // id, so once shown it stays quiet; the two actions below resolve it.
+        var pendingOffer = _continuePromptPending
+        if (pendingOffer && typeof pendingOffer.sessionId !== 'undefined'
+            && pendingOffer.sessionId === (tokenSource && tokenSource.getSessionId ? tokenSource.getSessionId() : null)) {
+          var offerAt = typeof pendingOffer.at === 'number' ? pendingOffer.at : Date.now()
+          alerts.push({
+            id: 'ctx-auto-continue-offer-' + offerAt,
+            severity: 'info',
+            title: function () { return t('continuePromptTitle') },
+            message: function () { return t('continuePromptBody') },
+            icon: '🔁',
+            timestamp: offerAt,
+            dismissible: true,
+            actions: [
+              {
+                id: 'auto-continue-enable',
+                label: function () { return t('continuePromptEnable') },
+                primary: true,
+                onClick: function () {
+                  var src = _activeTokenSource
+                  if (src && typeof src.armAutoRetry === 'function') {
+                    try { src.armAutoRetry() } catch (_) {}
+                  }
+                  _continuePromptPending = null
+                  _flushOfferPoll()
+                  return { message: t('continuePromptArmed'), close: true }
+                },
+              },
+              {
+                id: 'auto-continue-decline',
+                label: function () { return t('continuePromptDecline') },
+                primary: false,
+                onClick: function () {
+                  if (_continuePromptPending) {
+                    _continuePromptAt[_continuePromptPending.sessionId] = Date.now()
+                  }
+                  _continuePromptPending = null
+                  _flushOfferPoll()
+                  return { message: null, close: true }
+                },
+              },
+            ],
+          })
+        }
+
         try { callback(alerts) } catch (_) {}
 
         // Adaptive interval
@@ -2629,6 +2683,18 @@ var _PREFS_MAX_RETRIES = 8
         timer = setTimeout(poll, nextInterval)
       }
 
+      /** Immediately (re)run poll(), bypassing the adaptive timer. Used to
+       *  surface or retire the auto-continue offer alert the instant the data
+       *  layer records/resolves it, instead of waiting a poll interval. */
+      function _flushOfferPoll() {
+        if (timer) { clearTimeout(timer); timer = null }
+        if (callback) { try { poll() } catch (_) {} }
+      }
+
+      /** The handler this provider installs into _continuePromptBridge. Held
+       *  by reference so stop() can detach it without nuking a newer handler. */
+      var _promptHandler = function () { _flushOfferPoll() }
+
       return {
         id: 'dsh-flash-ctx-mon:context-alert',
         start: function (cb, ctx) {
@@ -2637,6 +2703,11 @@ var _PREFS_MAX_RETRIES = 8
           tokenSource = createSessionEventTokenSource()
           tokenSource.start(ctx)
           _activeTokenSource = tokenSource
+          // Route the data layer's continue-offer to an immediate poll so the
+          // info alert surfaces the moment the human types "continue" (the
+          // adaptive poll alone could delay it by a whole interval). Cleared in
+          // stop() so a dead provider is never called.
+          _continuePromptBridge.handler = _promptHandler
           // A skill is used between polls, and the adaptive interval can be
           // longer than the freshness window a notice is judged against (base
           // 20s doubles to ~22s in precise mode). Poll as soon as the tracker
@@ -2651,6 +2722,10 @@ var _PREFS_MAX_RETRIES = 8
           poll()
         },
         stop: function () {
+          // Only clear the bridge if it still points at THIS provider's handler.
+          if (_continuePromptBridge && _continuePromptBridge.handler === _promptHandler) {
+            _continuePromptBridge.handler = null
+          }
           callback = null
           if (timer) { clearTimeout(timer); timer = null }
           if (skillUnsub) { try { skillUnsub() } catch (_) {} skillUnsub = null }
@@ -3403,112 +3478,6 @@ var _PREFS_MAX_RETRIES = 8
         console.error('[dsh-flash-ctx-mon] failed to open monitor config:', e)
         closeMonitorConfig()
       }
-    }
-
-    /** Dismiss the continue-prompt modal, if one is open. */
-    function closeContinuePrompt() {
-      if (_continuePromptRoot) { try { _continuePromptRoot.unmount() } catch (_) {} _continuePromptRoot = null }
-      if (_continuePromptHost) { try { _continuePromptHost.remove() } catch (_) {} _continuePromptHost = null }
-    }
-
-    /**
-     * Remount the continue-prompt modal for the current pending offer.
-     * Returns false when React DOM is unavailable or there is nothing to show.
-     */
-    function openContinuePrompt() {
-      if (!ReactDOMClient || !ReactDOMClient.createRoot) return false
-      if (!_continuePromptPending) return false
-      closeContinuePrompt()
-      var host = document.createElement('div')
-      host.style.cssText = 'position:fixed;inset:0;z-index:2200;'
-      document.body.appendChild(host)
-      _continuePromptHost = host
-      try {
-        _continuePromptRoot = ReactDOMClient.createRoot(host)
-        _continuePromptRoot.render(h(ContinuePromptModal, {
-          onClose: closeContinuePrompt,
-        }))
-        return true
-      } catch (e) {
-        console.error('[dsh-flash-ctx-mon] failed to open continue prompt:', e)
-        closeContinuePrompt()
-        return false
-      }
-    }
-
-    /**
-     * React component: the "open auto-retry?" popup offered after a human
-     * "continue" message. Reuses the shared modal chrome (mask/card/head/body)
-     * so it visually matches the monitor config modal. Two actions:
-     *   - Enable  → arm auto-retry for the active session, then close.
-     *   - Decline → record the per-session cooldown and close.
-     */
-    var CONTINUE_BTN = {
-      border: '1px solid currentColor',
-      borderRadius: '4px',
-      padding: '3px 10px',
-      fontSize: '11px',
-      lineHeight: '1.5',
-      background: 'transparent',
-    }
-    function ContinuePromptModal(props) {
-      var onClose = props.onClose
-
-      function _armAndClose() {
-        var src = _activeTokenSource
-        if (src && typeof src.armAutoRetry === 'function') {
-          try { src.armAutoRetry() } catch (_) {}
-        }
-        onClose()
-      }
-
-      function _declineAndClose() {
-        if (_continuePromptPending) {
-          _continuePromptAt[_continuePromptPending.sessionId] = Date.now()
-        }
-        _continuePromptPending = null
-        onClose()
-      }
-
-      // Headline reflects whether auto-retry is already running for this
-      // session (read from the token source's live view; armed === 'armed').
-      var armed = !!(function () {
-        var src = _activeTokenSource
-        if (!src || typeof src.getAutoRetryView !== 'function') return false
-        try {
-          var view = src.getAutoRetryView()
-          return !!(view && view.state === 'armed')
-        } catch (_) { return false }
-      }())
-
-      return h('div', { style: S.monitorModalMask },
-        h('div', { style: S.monitorModal },
-          h('div', { style: S.monitorModalHead },
-            h('span', { style: S.monitorModalTitle }, t('continuePromptTitle')),
-            h('button', {
-              type: 'button',
-              style: S.monitorModalClose,
-              onClick: _declineAndClose,
-            }, '✕'),
-          ),
-          h('div', { style: S.monitorModalBody },
-            h('div', { style: { fontSize: '13px', lineHeight: '1.6', color: '#343a40' } },
-              armed ? t('continuePromptArmed') : t('continuePromptBody')),
-            h('div', { style: { marginTop: '16px', display: 'flex', alignItems: 'center', gap: '8px' } },
-              h('button', {
-                type: 'button',
-                style: Object.assign({}, CONTINUE_BTN, { color: '#2f9e44' }),
-                onClick: _armAndClose,
-              }, t('continuePromptEnable')),
-              h('button', {
-                type: 'button',
-                style: Object.assign({}, CONTINUE_BTN, { color: '#868e96' }),
-                onClick: _declineAndClose,
-              }, t('continuePromptDecline')),
-            ),
-          ),
-        ),
-      )
     }
 
     /** React component: the per-monitor configuration popup. */
@@ -4618,10 +4587,11 @@ var _PREFS_MAX_RETRIES = 8
       async _applyInner(ctx) {
         _prefCtx = ctx
 
-        // 0. Point the continue-prompt bridge at this module's React renderers
-        //    so a "continue" message can mount the modal whenever the browser
-        //    UI is live. Cleared on dispose so a dead renderer is never called.
-        _continuePromptBridge.handler = openContinuePrompt
+        // 0. The continue-prompt bridge is now wired by the alert provider
+        //    (createSessionContextProvider.start installs an immediate-poll
+        //    handler; the custom React modal is gone, the offer is surfaced as
+        //    a dsh-flash info alert). Nothing to install here — just clear any
+        //    leftover pending state so a fresh apply never shows a stale offer.
         _continuePromptPending = null
 
         // 0b. Wire the resident flash-icon indicator into the auto-retry view
@@ -4781,7 +4751,6 @@ var _PREFS_MAX_RETRIES = 8
 
       dispose() {
         closeMonitorConfig()
-        closeContinuePrompt()
         _continuePromptBridge.handler = null
         _continuePromptPending = null
         _clearAutoRetryDomIndicator()

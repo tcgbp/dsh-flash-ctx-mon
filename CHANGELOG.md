@@ -11,6 +11,31 @@ thresholds, and offers a **session skills chip** that lists the skills the curre
 session has actually loaded. It is client-side only; the host half exists just to
 hold the settings namespace and schema.
 
+## Unreleased
+
+**The "open auto-retry?" question is no longer a custom React modal.** After a
+human "continue" message in an unarmed session, the context alert provider now
+publishes an **info-level alert** (`ctx-auto-continue-offer-<ts>`, 🔁,
+dismissible) through the `dshFlashAlerts` registry, so the question is asked via
+dsh-flash's own toast/detail modal — the same surface that shows the monitor's
+warnings. Two actions resolve it without any custom UI:
+- **开启自动继续** (primary) → `armAutoRetry()` for the current session, clear
+  the pending offer, re-emit immediately (removes the alert) and close with a
+  "已开启自动重试" status.
+- **暂不** → record the per-session cooldown (`_continuePromptAt[sid] = now`),
+  clear the pending offer, re-emit immediately and close silently.
+
+Internal: the `ContinuePromptModal` component, `CONTINUE_BTN`, the
+`openContinuePrompt`/`closeContinuePrompt` renderers and their transient
+`_continuePromptRoot`/`_continuePromptHost` DOM are **fully removed**. The
+`_continuePromptBridge`/`_continuePromptPending` channel is retained, repurposed
+as a data-layer → provider handoff: the provider's `start()` installs an
+immediate-poll handler and `stop()` detaches it by reference; the token source
+exposes `getSessionId()` and its `_reset()` clears a stale pending offer on
+session switch so it never leaks into a new session. `_maybePromptAutoRetry`'s
+guards and cooldown semantics are unchanged, and plain dismissal of the toast
+does not record a cooldown (only the explicit「暂不」button does).
+
 ## 0.2.2
 
 **Release engineering only — no runtime behaviour change.** The publish workflow is
