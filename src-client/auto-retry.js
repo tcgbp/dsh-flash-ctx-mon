@@ -118,6 +118,33 @@ export function consumeContinuation(state, nowMs, cooldownMs) {
 }
 
 /**
+ * HANDOFF_PREFIXES — leading phrases that read as an unfinished handoff rather
+ * than a completed turn: the model promises to "let me / 让我 / 让我来 …" do
+ * something and then stops without doing it. All are matched as a PREFIX on the
+ * (trimmed, case-normalised) final assistant text, so nothing after the phrase
+ * matters.
+ */
+export var HANDOFF_PREFIXES = ['让我', '让我来', 'let me']
+
+/**
+ * isHandoffStub — true when the final assistant text of a turn opens with a
+ * hand-off phrase ("让我 / 让我来 / let me"), ignoring leading whitespace and
+ * case. A retryable-end fallback: even a "normal" turn/end is treated as
+ * unfinished when the model only promised work and produced nothing after it.
+ * Any other opening (or an absent/empty text) is false.
+ */
+export function isHandoffStub(text) {
+  if (typeof text !== 'string') return false
+  var trimmed = text.replace(/^\s+/, '')
+  if (!trimmed) return false
+  var lowered = trimmed.toLowerCase()
+  for (var i = 0; i < HANDOFF_PREFIXES.length; i++) {
+    if (lowered.indexOf(HANDOFF_PREFIXES[i]) === 0) return true
+  }
+  return false
+}
+
+/**
  * isSelfEcho — §5.4 echo recognition.
  *
  * An entry `{ source, text, ts }` is our own "继续" echo when ALL hold:

@@ -56,6 +56,7 @@ import {
   shouldAutoContinue,
   consumeContinuation,
   isSelfEcho,
+  isHandoffStub,
   retryAttemptKey,
   requestIdForAttempt,
 } from './auto-retry.js'
@@ -1155,6 +1156,12 @@ var _PREFS_MAX_RETRIES = 8
       var _unsubscribe = null
       var _listUnsubscribe = null
       var _lastUsage = null   // latest usage from the most recent assistant/message
+      /** Text of the latest assistant output for the CURRENT session. Kept so a
+       *  turn/end can decide whether the model only promised work ("让我 / 让我来
+       *  / let me …") and stopped — a handoff stub is treated as retryable even
+       *  when the end reason itself is not an error/interrupt/max-tokens. Reset
+       *  on session switch so one session cannot read another's tail. */
+      var _lastAssistantText = null
       var _lastProcessedSeq = -1
       var _model = null
       var _contextWindow = null
@@ -1366,10 +1373,14 @@ var _PREFS_MAX_RETRIES = 8
       }
 
       /** turn/end hook: retryable ends arm + schedule; any other end while
-       *  armed means the turn settled on its own and the guard stands down. */
+       *  armed means the turn settled on its own and the guard stands down.
+       *  Retryable is broader than the raw reason kind: a turn that ended on a
+       *  handoff stub ("让我 / 让我来 / let me …" tail with nothing after it) is
+       *  also worth an automatic continue (§5.1 + handoff-stub fallback). */
       function _handleTurnEnd(reason) {
         try {
-          if (!isRetryableEnd(reason)) { _disarmAutoRetry(); return }
+          var turnRetryable = isRetryableEnd(reason) || isHandoffStub(_lastAssistantText)
+          if (!turnRetryable) { _disarmAutoRetry(); return }
           _armAutoRetry()
           var rec = _activeAutoRetryRecord()
           if (!rec) return
@@ -1591,6 +1602,44 @@ var _PREFS_MAX_RETRIES = 8
         return null
       }
 
+      /** Extract the assistant's own final text from an assistant/message event.
+       *  DSH may put the finished output directly on ev.data.content (a string,
+       *  a block array, or a {content}/{text} object), or stream it as
+       *  text-typed chunks inside ev.data.stream. Returns null when no text is
+       *  present. Only surfaces the tail of a real assistant message, never a
+       *  usage-only packet. */
+      function _lastAssistantTextOf(ev) {
+        var data = ev.data
+        if (!data) return null
+        // Path 1: direct content on the event data.
+        if (data.content != null) {
+          var direct = _firstTextOf(data.content)
+          if (typeof direct === 'string' && direct) return direct
+        }
+        // Path 2: concatenated text chunks in the stream.
+        if (data.text != null && typeof data.text === 'string') return data.text
+        var stream = data.stream
+        if (Array.isArray(stream)) {
+          var parts = []
+          for (var j = 0; j < stream.length; j++) {
+            var rec = stream[j]
+            if (!rec) continue
+            if (rec.type === 'chunk' && rec.chunk) {
+              var c = rec.chunk
+              if (c.type === 'text' && typeof c.text === 'string') {
+                parts.push(c.text)
+              } else if (typeof c.content === 'string') {
+                parts.push(c.content)
+              }
+            } else if (rec.type === 'text' && typeof rec.text === 'string') {
+              parts.push(rec.text)
+            }
+          }
+          if (parts.length) return parts.join('')
+        }
+        return null
+      }
+
       function _processEntries(entries) {
         var foundUsageInBatch = false
         for (var i = 0; i < entries.length; i++) {
@@ -1603,6 +1652,16 @@ var _PREFS_MAX_RETRIES = 8
           if (seq >= 0 && seq <= _lastProcessedSeq) continue
 
           if (ev.type === 'assistant/message' || ev.type === 'assistant/attempt') {
+            // Track the tail of the assistant's own output so a later turn/end
+            // can judge whether the model only promised work and then stopped
+            // ("让我 / 让我来 / let me …") — a handoff stub is retryable even on
+            // a "normal" end. Only a FINISHED assistant message that carries
+            // real text updates this; a usage-only attempt packet must not
+            // clobber the last complete message.
+            if (ev.type === 'assistant/message') {
+              var tailText = _lastAssistantTextOf(ev)
+              if (typeof tailText === 'string' && tailText) _lastAssistantText = tailText
+            }
             var usage = _usageOf(ev)
             if (usage && typeof usage === 'object') {
               // Last-wins: each event reports the FULL token counts for that
@@ -1809,6 +1868,7 @@ var _PREFS_MAX_RETRIES = 8
         if (_bindRetryTimer) { clearTimeout(_bindRetryTimer); _bindRetryTimer = null }
         _lastUsage = null
         _lastProcessedSeq = -1
+        _lastAssistantText = null
         _model = null
         _contextWindow = null
         _contextWindowModel = null

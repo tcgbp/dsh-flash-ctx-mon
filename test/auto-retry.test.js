@@ -11,6 +11,7 @@ import {
   shouldAutoContinue,
   consumeContinuation,
   isSelfEcho,
+  isHandoffStub,
   retryAttemptKey,
   requestIdForAttempt,
 } from '../src-client/auto-retry.js'
@@ -244,5 +245,47 @@ describe('idempotent requestId (§5.8)', () => {
 
   it('requestIdForAttempt tolerates a missing cache without minting', () => {
     expect(requestIdForAttempt(null, 'x#1', function () { throw new Error('should not mint') })).toBe(null)
+  })
+})
+
+describe('isHandoffStub', () => {
+  it('accepts leading 让我 (Chinese hand-off)', () => {
+    expect(isHandoffStub('让我来检查这个')).toBe(true)
+    expect(isHandoffStub('让我'), 'exact 让我').toBe(true)
+    expect(isHandoffStub('让我分析一下失败原因')).toBe(true)
+  })
+
+  it('accepts leading 让我来', () => {
+    expect(isHandoffStub('让我来帮你修复')).toBe(true)
+    expect(isHandoffStub('让我来完成这个任务')).toBe(true)
+  })
+
+  it('accepts let me ignoring case and leading whitespace', () => {
+    expect(isHandoffStub('let me check that')).toBe(true)
+    expect(isHandoffStub('Let me try again')).toBe(true)
+    expect(isHandoffStub('LET ME look at the logs')).toBe(true)
+    expect(isHandoffStub('  \n\tlet me debug this'), 'leading whitespace').toBe(true)
+  })
+
+  it('rejects a phrase that is only a substring, not a prefix', () => {
+    expect(isHandoffStub('please let me handle it'), 'starts with please').toBe(false)
+    expect(isHandoffStub('先让我来'), '"先" before 让我来').toBe(false)
+  })
+
+  it('rejects completion-like or empty text', () => {
+    expect(isHandoffStub('已完成任务')).toBe(false)
+    expect(isHandoffStub('done')).toBe(false)
+    expect(isHandoffStub(''), 'empty string').toBe(false)
+    expect(isHandoffStub('   '), 'whitespace only').toBe(false)
+    expect(isHandoffStub(null)).toBe(false)
+    expect(isHandoffStub(undefined)).toBe(false)
+    expect(isHandoffStub(42)).toBe(false)
+    expect(isHandoffStub({ text: '让我来' }), 'object, not a string').toBe(false)
+  })
+
+  it('accepts handoff text produced mid-sentence with a leading bullet is not matched, bare 让我 is', () => {
+    // A handoff stub is only counted when the phrase is at the very start.
+    expect(isHandoffStub('好的，让我来')).toBe(false)
+    expect(isHandoffStub('让我来，我来处理')).toBe(true)
   })
 })

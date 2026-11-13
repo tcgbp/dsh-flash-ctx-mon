@@ -163,6 +163,56 @@ catalog description, with **Open in sidebar**.
 The tracker is deliberately **independent of the monitor switch**: the chip keeps working
 with the context monitor switched off.
 
+## Auto-continue
+
+When, in an **unarmed** session, you send a human "continue" message, this plugin asks
+whether to enable auto-continue — and it does so **without a bespoke modal**: it reuses
+dsh-flash's **info-level alert** by publishing a 🔁 `info` alert into the `dshFlashAlerts`
+registry, so dsh-flash's own toast/detail modal (the same surface the monitor's warnings
+use) carries the question, with two buttons:
+
+- **开启自动继续 / Enable auto-continue** — arms the guard for the current session, echoes an
+  "auto-continue armed" status and closes;
+- **暂不 / Not now** — closes silently and records a cooldown for that session (so it won't
+  re-ask within 60 s).
+
+Once armed, whenever a turn ends by a **retryable** criterion (after the `autoRetryGraceMs`
+grace, then spaced by `autoRetryCooldownMs` with exponential backoff) the guard re-emits a
+"continue" automatically, at most `autoRetryMaxConsecutive` times. "Retryable" is an **OR of
+criteria** — either fires: ① the `turn/end` reason is `error` / `interrupted` / `max-tokens`;
+② the turn's final assistant output **starts with "让我 / 让我来 / let me"** (prefix match,
+leading whitespace and case ignored) yet nothing followed it — in many coding/execution tasks
+an ending like "让我检查日志 / Let me look at the tests" means the model promised a next step
+without actually finishing. **Auto-continue is tracked per session** — the guard record is
+bound to the session that originally sent the "continue", and switching sessions starts the
+next one fresh in the "stopped" state.
+
+### When auto-continue turns off / pauses
+
+The guard is released in two tiers: **fully off (disarmed)** and **paused for human input**.
+
+It is **fully turned off** when:
+
+1. **Genuine human input** — while armed, the session receives a message that is **not** the
+   auto "continue" self-echo; the wheel is handed back to you and the guard (and its
+   consecutive budget) is forgotten.
+2. **The turn settles on its own** — `turn/end` fires for a reason that is neither `error` /
+   `interrupted` / `max-tokens`, and the final assistant output does not open with
+   "让我 / 让我来 / let me" (no handoff stub), meaning the turn actually finished.
+3. **Manual stop** — you press "Stop auto-continue".
+4. **The auto-send cannot run** — no prompt-capable session is reachable, the continue text
+   is empty, or the `prompt` injection throws (it silently stands down rather than spin).
+
+It **pauses (but stays conceptually armed)** when:
+
+5. **The consecutive budget is exhausted** — after `autoRetryMaxConsecutive` (default 4)
+   continues still did not finish, it freezes in the `paused` state (solid red ring) waiting
+   for you; your next message hits case 1 and fully clears the guard with a fresh budget.
+
+Note: while armed but inside the **cooldown window** (`autoRetryCooldownMs`) or **already
+scheduled** (counting down grace/backoff), the guard simply stays armed and idle — that is
+not a turn-off.
+
 ## Settings
 
 | Field | Default | Notes |
@@ -175,6 +225,12 @@ with the context monitor switched off.
 | `ctxPollMin` | 2000 | ms, the floor |
 | `modelContextWindows` | `{}` | model id → window size |
 | `modelContextWindowSources` | `{}` | model id → provenance tag |
+| `autoRetryGraceMs` | 5000 | how long after an abnormal turn/end to wait before auto-sending "continue" (suggest 3–8 s) |
+| `autoRetryCooldownMs` | 20000 | minimum spacing between two auto-continues in the same session (cap); prevents burning tokens |
+| `autoRetryMaxConsecutive` | 4 | pause and wait for the user once this many consecutive auto-continues still did not finish |
+| `autoRetryMaxBackoffMs` | 300000 | ceiling of the exponential backoff: the more it fails, the longer the gap — but never more than this |
+| `autoRetryContinueText` | `继续` | the text auto-continue sends; used (with the request id) to recognize self-echo — keep the default |
+| `autoRetryEchoWindowMs` | 30000 | messages of the same text received within this window after a "continue" are treated as self-echo, not user input |
 
 ## Dependencies
 
