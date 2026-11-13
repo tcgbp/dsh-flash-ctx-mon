@@ -208,4 +208,39 @@ signature 注释、缺字段体；作者复核已裁决「补丁后缀的语义�
 
 ---
 
+## 9. 宿主契约核查：为什么「非当前会话自动发送继续」不可行（记录）
+
+本节为一次**后续核查**的记录，回答「开启自动继续的那个会话被切走后，能否再由插件代发 continue」。
+核查依据真实宿主产物 `@deepseek-ai/dsh-api-session-controller/lib/types/client/`（0.2.1-rc.5），仅做只读
+核对、不新增代码；与 §8.2 互补——后者证实 `session/prompt` 契约存在，本节证实「跨会话通路」这一步的边界。
+
+### 9.1 事实 A：不存在全局事件流
+
+- `contract/events.d.ts`（`SessionEventSource`）唯一暴露的事件源是
+  `SessionEventSource = ObservableSnapshot<SessionEventWindow>`，一个**单会话**事件窗口，由
+  `MutableSessionEventSource.replace / prepend / append` 驱动；没有跨会话聚合源。
+- 对全部 `dsh-api-*` 包检索 `mux` / `api.events` / `EventSource` 等事件相关标识，命中集中在
+  `dsh-api-gateway` 的 `RemoteStreamMuxClient/Server`（WebSocket 流多路复用），**与会话事件无关**。
+- **结论：设计早期对「全局 `api.events.mux`（跨会话事件流）」的设想在真实宿主不存在。**
+
+### 9.2 事实 B：没有「对任意 sessionId 发送」的 RPC
+
+- `SessionFace.prompt(content, mode: 'queue' | 'steer', signal?, requestId?)`
+  （`contract/session.d.ts` 的 `SessionFace`，`sessions/session.d.ts`）挂在**单个 `Session` 对象**上，
+  不是按 id 寻址的独立方法。
+- 该 `Session` 对象只对「retained / 活动」会话存在：`sessions/service.d.ts` 的 `binding(id)` 对
+  「无 retained generation」的会话返回 `undefined`；`sessionOf(ctx)` 对 untagged 或 ended 的生成也返回 `undefined`。
+
+### 9.3 结论
+
+- 同页切走后，被切走会话 A 若无 retained generation，`binding(A)` 即消失 → 插件**既读不到 A 的事件，
+  也发不了 A 的 prompt**。客户端插件层没有跨会话通路。
+- 宿主对**每个已启动回合的会话**自建 run loop 并自行接完（`MutableSessionEventSource` 由 manager 驱动、
+  `Session.running` 状态），因此「被切走且正在跑」的会话宿主自会续完——**插件代发是伪需求**，硬做还会带来
+  二次计费 / 与宿主自接续竞态的风险。
+- **可正确承担的唯一插件边界即现状方案 A**：停在 retryable 终态（error / interrupted / max-tokens）且
+  仍保留 binding 的**当前会话**。本节据此维持现状、不新增跨会话能力。
+
+---
+
 *本文档为纯设计存档，不属于功能改动，不 bump 版本、不写 CHANGELOG。*
