@@ -1685,8 +1685,16 @@ var _PREFS_MAX_RETRIES = 8
         return null
       }
 
-      function _processEntries(entries) {
+      function _processEntries(entries, opts) {
         var foundUsageInBatch = false
+        // `replay` marks a full-snapshot reproduction (history replace from
+        // compaction/compress, or the initial bind scan) rather than a live
+        // incremental event. During a replay the session provably still exists,
+        // so re-delivered historical turn/end and user/message entries must be
+        // re-accounted (usage, ledger, assistant tail) but must NOT mutate the
+        // auto-retry armed state — a compaction replacing the history must never
+        // clear a persisted arm. Only live events may arm/disarm.
+        var replay = !!(opts && opts.replay)
         for (var i = 0; i < entries.length; i++) {
           var entry = entries[i]
           if (entry.type !== 'event') continue
@@ -1838,8 +1846,10 @@ var _PREFS_MAX_RETRIES = 8
               // Auto-retry hook: retryable ends schedule a guarded auto
               // continue; any other end while armed means the turn settled on
               // its own, so the guard drops back to idle rather than firing
-              // late.
-              _handleTurnEnd(reason)
+              // late. Only a LIVE turn/end may mutate the armed state — a
+              // replayed history of completed turns (compaction) must not clear
+              // a persisted arm while the session still exists.
+              if (!replay) _handleTurnEnd(reason)
             }
             if (seq >= 0 && seq > _lastProcessedSeq) _lastProcessedSeq = seq
           } else if (ev.type === 'user/message') {
@@ -1847,21 +1857,31 @@ var _PREFS_MAX_RETRIES = 8
             // echoed back into the log (see §8.4 of the design: the injected
             // prompt lands as a user-rpc source), or (b) genuine human input.
             // The self-echo detector is pure; anything else disarms the guard.
+            // During a replay (compaction/history replace) the surviving
+            // historical messages must not touch that armed state, and the
+            // compaction summary itself rides on user/message — so skip it.
             try {
               var udata = ev.data || {}
               var usrc = udata.source || udata.sourceMeta || null
               var ukind = (usrc && usrc.kind) || udata.kind || null
               var urpc = (udata.rpcId != null) ? udata.rpcId : ((usrc && usrc.rpcId != null) ? usrc.rpcId : null)
-              var logEntry = {
-                source: { kind: ukind, rpcId: urpc },
-                text: _firstTextOf(udata.content),
+              // The compaction summary rides on a user/message whose surfaceOp is
+              // {op:'replace'} (§ compaction.md). It is log/surface-only — never
+              // a human take-over — so it must not disarm an armed guard even if
+              // it arrives as a live (non-replay) event.
+              var compactionSummary = !!(udata.surfaceOp && udata.surfaceOp.op === 'replace')
+              if (!replay && !compactionSummary) {
+                var logEntry = {
+                  source: { kind: ukind, rpcId: urpc },
+                  text: _firstTextOf(udata.content),
+                }
+                // Snapshot whether the guard was already running the instant
+                // this message landed: a message that interrupts an armed retry
+                // is a deliberate human take-over, so it must NOT re-offer.
+                var enteredArmed = !!(_activeAutoRetryRecord() && _activeAutoRetryRecord().armed)
+                _handleUserMessage(logEntry, typeof ev.time === 'number' ? ev.time : Date.now())
+                if (!enteredArmed) _maybePromptAutoRetry(logEntry, typeof ev.time === 'number' ? ev.time : Date.now())
               }
-              // Snapshot whether the guard was already running the instant this
-              // message landed: a message that interrupts an armed retry is a
-              // deliberate human take-over, so it must NOT re-offer itself.
-              var enteredArmed = !!(_activeAutoRetryRecord() && _activeAutoRetryRecord().armed)
-              _handleUserMessage(logEntry, typeof ev.time === 'number' ? ev.time : Date.now())
-              if (!enteredArmed) _maybePromptAutoRetry(logEntry, typeof ev.time === 'number' ? ev.time : Date.now())
             } catch (e) {
               // Non-fatal: malformed user/message payload
             }
@@ -1889,8 +1909,12 @@ var _PREFS_MAX_RETRIES = 8
           if (!binding) return
           var win = binding.eventSource.getSnapshot()
           if (!win || !win.entries) return
-          // On replace (history reload), reset last-usage and re-scan
-          if (win.change && win.change.kind === 'replace') {
+          // On replace (history reload from compaction/compress), reset
+          // last-usage and re-scan the fresh snapshot. The full reprocessing
+          // must be marked replay so historical turn/end & user/message events
+          // are re-accounted without clearing a persisted auto-retry arm.
+          var isReplace = !!(win.change && win.change.kind === 'replace')
+          if (isReplace) {
             _lastUsage = null
             _lastProcessedSeq = -1
             _model = null
@@ -1901,7 +1925,7 @@ var _PREFS_MAX_RETRIES = 8
             _openTurnLedger = clearOpenTurns(_openTurnLedger, _sessionId)
             _publishUnsettledView()
           }
-          _processEntries(win.entries)
+          _processEntries(win.entries, { replay: isReplace })
         } catch (e) {
           // Non-fatal: event source may be mid-transition
         }
@@ -1930,7 +1954,7 @@ var _PREFS_MAX_RETRIES = 8
             var win = binding.eventSource.getSnapshot()
             var entryCount = win && win.entries ? win.entries.length : 0
             console.log('[dsh-flash-ctx-mon] SessionEventTokenSource: binding to session ' + _sessionId + ', ' + entryCount + ' entries in snapshot')
-            if (win && win.entries) _processEntries(win.entries)
+            if (win && win.entries) _processEntries(win.entries, { replay: true })
             _unsubscribe = binding.eventSource.subscribe(_onEventWindowChange)
           } else {
             var snapN = 0
