@@ -1205,6 +1205,22 @@ var _PREFS_MAX_RETRIES = 8
       // A `false` (disarmed) and a missing entry are semantically identical
       // (both mean "do not auto-arm"), so disarm DROPS the key instead of
       // keeping a stale entry — archived/closed sessions never accumulate.
+      /** Symmetric read of the persisted per-session map. Returns the parsed
+       *  map (possibly empty) when a value is stored, or null when the key is
+       *  missing or not valid JSON — callers treat that as "nothing persisted"
+       *  and fall back to the default (not armed). */
+      function _readAutoRetryPref() {
+        try {
+          var raw = localStorage.getItem(AUTORETRY_SESSION_KEY)
+          if (raw == null) return null
+          var parsed = JSON.parse(raw)
+          return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+            ? parsed
+            : null
+        } catch (_) {
+          return null
+        }
+      }
       function _writeAutoRetryPref(sessionId, armed) {
         try {
           const next = applyAutoRetryPref(_readAutoRetryPref(), sessionId, armed)
