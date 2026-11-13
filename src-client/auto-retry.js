@@ -191,3 +191,43 @@ export function requestIdForAttempt(cache, attemptKey, mint) {
   if (!cache.has(attemptKey)) cache.set(attemptKey, mint(attemptKey))
   return cache.get(attemptKey)
 }
+
+/**
+ * Persistence of the per-session auto-continue choice.
+ *
+ * The armed/stopped state of each session is kept in localStorage as a map of
+ * `sessionId -> boolean` so that switching away from a session (or reloading
+ * the page) does not silently reset the user's choice. The map records whether
+ * auto-continue was last left ARMED (true), DISARMED (false), or unknown
+ * (missing entry). A session with no stored entry falls back to the default
+ * (not armed), preserving the pre-existing behaviour.
+ */
+export var AUTORETRY_SESSION_KEY = 'dsh-flash-ctx-mon:autoretry-sessions'
+
+/**
+ * isPersistenceArmed — should a session be re-armed on bind? True only when
+ * the persisted map records an explicit `true` for that session. A missing
+ * entry and a stored `false` both mean "do not auto-arm".
+ */
+export function isPersistenceArmed(prefs, sessionId) {
+  return !!(prefs && prefs[sessionId] === true)
+}
+
+/**
+ * applyAutoRetryPref — immutable update of the persisted per-session map.
+ * Arming writes/stores `true`; disarming DROPS the key (a stored `false` is
+ * semantically identical to a missing entry — both mean "don't auto-arm" — so
+ * keeping it would only let archived sessions accumulate forever). The caller
+ * persists `prefs` when non-null and clears the localStorage key when null so
+ * no orphan entry is ever left behind. Returns the input prefs mutated only
+ * via a shallow copy, or null when the map has no remaining entries.
+ */
+export function applyAutoRetryPref(prefs, sessionId, armed) {
+  var next = Object.assign({}, prefs || {})
+  if (armed) {
+    next[sessionId] = true
+  } else {
+    delete next[sessionId]
+  }
+  return Object.keys(next).length ? next : null
+}

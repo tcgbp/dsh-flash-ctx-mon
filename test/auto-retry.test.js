@@ -14,6 +14,9 @@ import {
   isHandoffStub,
   retryAttemptKey,
   requestIdForAttempt,
+  isPersistenceArmed,
+  applyAutoRetryPref,
+  AUTORETRY_SESSION_KEY,
 } from '../src-client/auto-retry.js'
 
 describe('isRetryableEnd', () => {
@@ -287,5 +290,60 @@ describe('isHandoffStub', () => {
     // A handoff stub is only counted when the phrase is at the very start.
     expect(isHandoffStub('好的，让我来')).toBe(false)
     expect(isHandoffStub('让我来，我来处理')).toBe(true)
+  })
+})
+
+describe('per-session persistence (isPersistenceArmed / AUTORETRY_SESSION_KEY)', () => {
+  it('exposes a namespaced localStorage key consistent with other ctx-mon toggles', () => {
+    // Same storage namespace as the main context monitor, distinct key.
+    expect(AUTORETRY_SESSION_KEY.startsWith('dsh-flash-ctx-mon:')).toBe(true)
+    expect(AUTORETRY_SESSION_KEY).toBe('dsh-flash-ctx-mon:autoretry-sessions')
+  })
+
+  it('re-arms ONLY a session the user last left armed (explicit true)', () => {
+    const prefs = { 'sess-a': true, 'sess-b': false }
+    expect(isPersistenceArmed(prefs, 'sess-a')).toBe(true)
+    expect(isPersistenceArmed(prefs, 'sess-b')).toBe(false)
+  })
+
+  it('never auto-re-arms a session with no stored entry (default = not armed)', () => {
+    expect(isPersistenceArmed(null, 'new-session')).toBe(false)
+    expect(isPersistenceArmed(undefined, 'new-session')).toBe(false)
+    expect(isPersistenceArmed({}, 'new-session')).toBe(false)
+  })
+
+  it('ignores malformed or non-boolean stored values', () => {
+    // A string "true" must not be treated as armed — only strict booleans.
+    expect(isPersistenceArmed({ s: 'true' }, 's')).toBe(false)
+    expect(isPersistenceArmed({ s: 1 }, 's')).toBe(false)
+    expect(isPersistenceArmed({ s: null }, 's')).toBe(false)
+    expect(isPersistenceArmed('garbage', 's')).toBe(false)
+  })
+
+  // Storage hygiene: disarming an archived/closed session must not leave a
+  // stale entry behind — a stored `false` is identical to a missing entry, so
+  // keeping it would let old sessions accumulate in localStorage forever.
+  it('arming stores true for the session (survives switching/reload)', () => {
+    expect(applyAutoRetryPref({}, 'sess-a', true)).toEqual({ 'sess-a': true })
+    const merged = applyAutoRetryPref({ 'sess-old': true }, 'sess-b', true)
+    expect(merged).toEqual({ 'sess-old': true, 'sess-b': true })
+  })
+
+  it('disarming DROPS the key rather than storing false', () => {
+    expect(applyAutoRetryPref({ 'sess-a': true }, 'sess-a', false)).toBe(null)
+    const kept = applyAutoRetryPref({ 'sess-a': true, 'sess-b': true }, 'sess-b', false)
+    expect(kept).toEqual({ 'sess-a': true })
+  })
+
+  it('disarming a session with no stored entry is a no-op', () => {
+    expect(applyAutoRetryPref(null, 'unknown', false)).toBe(null)
+    expect(applyAutoRetryPref({}, 'unknown', false)).toBe(null)
+  })
+
+  it('a returned null means the caller must clear the localStorage key', () => {
+    // null (no remaining entries) is the signal to removeItem; a non-null map
+    // is the signal to setItem — never an empty object lingering in storage.
+    expect(applyAutoRetryPref({ 'only': true }, 'only', false)).toBe(null)
+    expect(applyAutoRetryPref(null, 'x', true)).toEqual({ 'x': true })
   })
 })

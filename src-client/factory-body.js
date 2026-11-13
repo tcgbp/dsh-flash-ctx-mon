@@ -59,6 +59,9 @@ import {
   isHandoffStub,
   retryAttemptKey,
   requestIdForAttempt,
+  isPersistenceArmed,
+  applyAutoRetryPref,
+  AUTORETRY_SESSION_KEY,
 } from './auto-retry.js'
 import {
   makeLedger,
@@ -1189,6 +1192,37 @@ var _PREFS_MAX_RETRIES = 8
       var _retryTimer = null                     // single emission timer (one-at-a-time guard)
 
       // ─────────────────────────────────────────────────────────────────────
+      // Per-session auto-continue persistence (§"保存自动继续状态").
+      //
+      // The armed/stopped state of each session is remembered in localStorage
+      // so that switching away from a session (or reloading the page) does not
+      // silently reset the user's choice. The map stores, per session id,
+      // whether auto-continue was last left ARMED (true), DISARMED (false), or
+      // unknown (missing). A session with no stored entry falls back to the
+      // default (not armed), preserving the pre-existing behaviour.
+      //
+      // A stored `true` (armed) is what must survive switching away / reloading.
+      // A `false` (disarmed) and a missing entry are semantically identical
+      // (both mean "do not auto-arm"), so disarm DROPS the key instead of
+      // keeping a stale entry — archived/closed sessions never accumulate.
+      function _writeAutoRetryPref(sessionId, armed) {
+        try {
+          const next = applyAutoRetryPref(_readAutoRetryPref(), sessionId, armed)
+          if (next) {
+            localStorage.setItem(AUTORETRY_SESSION_KEY, JSON.stringify(next))
+          } else {
+            localStorage.removeItem(AUTORETRY_SESSION_KEY)
+          }
+        } catch (_) {}
+      }
+      /** Whether a session should be re-armed on bind: true only if the user
+       *  last left it armed (an explicit stored "true"). Missing entry and a
+       *  stored "false" both mean don't auto-arm. */
+      function _wasAutoRetryArmed(sessionId) {
+        return isPersistenceArmed(_readAutoRetryPref(), sessionId)
+      }
+
+      // ─────────────────────────────────────────────────────────────────────
       // Open-turn ledger & watchdog (form ① detection — "turn started but no
       // closing turn/end ever arrived" — docs/detecting-unfinished-session.zh-CN.md).
       //
@@ -1225,7 +1259,15 @@ var _PREFS_MAX_RETRIES = 8
        *  on non-retryable turn/end, and on a manual disarm. */
       function _disarmAutoRetry() {
         _retryTimersClear()
-        if (_sessionId && _retryBySession[_sessionId]) delete _retryBySession[_sessionId]
+        if (_sessionId && _retryBySession[_sessionId]) {
+          delete _retryBySession[_sessionId]
+          // The guard was dropped for a real reason (manual disarm, genuine
+          // human input, or a non-retryable end). Drop the persisted choice
+          // for this session so a later bind does not unexpectedly re-arm it —
+          // a dropped key and a stored `false` are equivalent (both "don't
+          // auto-arm"), but dropping keeps archived sessions from accumulating.
+          _writeAutoRetryPref(_sessionId, false)
+        }
         _publishAutoRetryView()
       }
 
@@ -1245,6 +1287,9 @@ var _PREFS_MAX_RETRIES = 8
             now,
           )
         }
+        // Persist the choice: this session is now armed, so switching away
+        // then back (or reloading) must restore it instead of resetting it.
+        _writeAutoRetryPref(_sessionId, true)
         _publishAutoRetryView()
       }
 
@@ -1902,6 +1947,12 @@ var _PREFS_MAX_RETRIES = 8
         // the glow immediately (regression: the indicator was lost on switch-back
         // because switching sessions never re-published the view).
         _publishAutoRetryView()
+        // Restore the session's persisted choice: if the user last left auto-
+        // continue armed for THIS session (e.g. after reloading the page, which
+        // cleared _retryBySession), re-arm it so the state survives session
+        // switches instead of silently resetting. A record already in memory
+        // short-circuits inside _armAutoRetry, so this is idempotent.
+        if (_wasAutoRetryArmed(_sessionId)) _armAutoRetry()
         // Same for the watchdog badge: any bind re-derives the unsettled set
         // (grace elapsed while unbound), so the red count stays live.
         _publishUnsettledView()
