@@ -1290,6 +1290,18 @@ var _PREFS_MAX_RETRIES = 8
         // Persist the choice: this session is now armed, so switching away
         // then back (or reloading) must restore it instead of resetting it.
         _writeAutoRetryPref(_sessionId, true)
+        // A session that is already (or newly) armed must never be asked the
+        // "是否开启自动继续" (enable auto-continue?) question — the choice was
+        // made and persisted. Retire any pending offer for THIS session, and
+        // route the retraction to the provider so a stale toast re-emitted on
+        // return to an originally-auto-continuing session goes quiet instead
+        // of prompting again.
+        if (_continuePromptPending && _continuePromptPending.sessionId === _sessionId) {
+          _continuePromptPending = null
+          if (_continuePromptBridge && typeof _continuePromptBridge.handler === 'function') {
+            try { _continuePromptBridge.handler() } catch (_) {}
+          }
+        }
         _publishAutoRetryView()
       }
 
