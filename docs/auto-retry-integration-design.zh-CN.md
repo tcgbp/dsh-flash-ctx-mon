@@ -54,6 +54,17 @@
   - 在会话 A 武装后切到会话 B → 看到 B 自己的状态（默认未武装），A 不被误触；切回 A 状态仍在。
 - 事件消费走 ctx-mon 现有模型：`sessions.scopeOf(ctx)` 得当前活动会话 → `sessions.binding(id).eventSource`
   读事件（方案 A，无全局 mux）。
+- **「非当前会话永不真正 auto-send」边界（三重门槛，缺一不可）：**
+  - ① **事件源唯一性**：`SessionEventTokenSource` 只在 `_bindToSession()` 对 `sessions.binding(_sessionId).eventSource`
+    调一次 `subscribe`；切走时先对旧会话 `_unsubscribe()` 再绑新会话（`_reset`）。因此**代码可见的 `turn/end`、
+    `turn/start`、`user/message` 只来自当前绑定会话**——非绑定会话此后不再有任何事件进屋，从源头就无法触发继续。
+  - ② **runner 记录只按当前 `_sessionId` 索引**：`_activeAutoRetryRecord()` = `_retryBySession[_sessionId]`，
+    真正发送继续的入口 `_autoContinueEntry()` 首行即取它，取到 `null`（非当前会话）直接返回、不 `prompt()`；
+    即便 `_retryBySession` 里残留切走会话的 armed 记录，也不会被用到。
+  - ③ **发送目标也是当前会话**：`_resolveAutoSession()` 用当前 `_sessionId` 解析 session 再 `session.prompt()`——
+    即便①②意外漏过，发出的也是**当前绑定会话**，绝不可能把「继续」文本投到别的会话。
+  - 结论：persisted armed 标记（localStorage）只用于**切回该会话后恢复其 armed 状态**（`_bindToSession` 里
+    `isPersistenceArmed` → `_armAutoRetry`），绝不等于「后台替非当前会话代发」；真正 auto-send 恒指向此刻绑定的那个会话。
 
 ---
 
