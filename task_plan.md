@@ -89,3 +89,101 @@
 
 **待办**
 - [ ]（如需要）GUI 浏览器验证 info 告警 toast/detail 弹窗实际渲染与「开启/暂不」互动。
+
+---
+
+### 后续任务（已取代上一条）：继续词直接武装，移除询问/确认（用户最新要求）
+
+**目标**：按用户最新要求 —— **只要用户手动输入 继续 / continue / resume 等消息，就自动打开自动继续模式，不再弹窗让用户再次点击确认**。上一条「把询问从自定义 modal 换成 dsh-flash info 告警」本身也随之失去意义：**根本没有询问了**。
+
+**方案（用户确认）**：`_maybePromptAutoRetry` 改为 `_autoArmOnContinue` 直接调用 `_armAutoRetry()`（武装幂等；调用点仍先短路已武装会话）；`_matchesContinueWord` 增补 `resume` / `res`；询问/确认整套管线（bridge / pending / cooldown / offer 告警块及其两 action / `_flushOfferPoll` / `_promptHandler` / 各清理点 / `continuePrompt*` i18n）**全量移除**，避免陈旧代码再度弹出对话框。
+
+**已完成**
+- [x] `_matchesContinueWord` 增 `resume`/`res`；`_autoArmOnContinue` 直接武装。
+- [x] 移除 `_continuePromptBridge`/`_continuePromptPending`/`_continuePromptAt`/`CONTINUE_PROMPT_COOLDOWN_MS`、`_armAutoRetry` 回收块、provider poll offer 告警块及两 action、`_flushOfferPoll`/`_promptHandler`、provider start/stop 接线、`_reset`/`_applyInner`/`dispose` pending 清理、`continuePrompt*` i18n（zh+en）。
+- [x] 三门口令通过：`tsc --noEmit`、`vitest --pool=threads`（94/94）、`build-client.mjs`（bundle 含 `_autoArmOnContinue`/`resume`，无残留符号）。
+- [x] 更新 README×2 / CHANGELOG / progress / 本文件；不改用户 ` M` 文件。
+
+**待办**
+- [ ]（如需要）GUI 浏览器验证未武装会话输入「继续」即刻开启且无确认弹窗。
+
+---
+
+## 后续任务：退出告警带定位 + 人工输入不再退出自动继续（2026-11-14）
+
+**目标**：按用户要求改两处 —— ①「已退出自动继续」info 告警展示工作区 + 会话信息便于定位；② 检测到人工输入不再作为退出自动继续的条件。
+
+**方案（用户确认）**：`_noteAutoRetryExit` 退出时经 `_sessionWorkspace(sid)` 解析 cwd 存入 `_autoRetryExitedPending.workspace`；provider poll 的 exited 告警 message 用 `autoRetryExitedLocate` 追加 `（会话 <sid>，工作区 <cwd>）` 后缀。`_handleUserMessage` 非自身回显分支删除 `_disarmAutoRetry('human')`，守卫保持 armed。
+
+**已完成**
+- [x] i18n：zh/en 新增 `autoRetryExitedLoc*` 定位键；删除 `autoRetryExitedReasonHuman`。
+- [x] `autoRetryExitedReasonKey`/`AUTO_RETRY_EXIT_REASONS` 移除 `'human'`。
+- [x] `autoRetryExitedLocate()` + `_sessionWorkspace()` + `_noteAutoRetryExit` 带 workspace + provider 告警 message 拼装后缀。
+- [x] `_handleUserMessage` 人工输入不再 disarm。
+- [x] 同步 docs/auto-retry-integration-design.zh-CN.md + README×2。
+- [x] 三门口令通过：`tsc --noEmit`、`vitest --pool=threads`（94/94）、`build-client.mjs`（bundle 含新逻辑、无已删符号）。
+
+**待办**
+- [ ]（如需要）提交本轮改动；GUI 浏览器验证退出告警定位后缀。
+
+---
+
+## 后续任务：快捷面板「自动继续」开关完善（位置/图标/配置按钮/主开关显隐）（2026-11-14）
+
+**目标**：按用户多轮反馈完善「自动继续」开关（`dsh-flash-ctx-mon:auto-continue`）。
+根因：① `visible: _getRunnerActive()` 只在 auto-retry 运行时才渲染开关行；② `icon: 'refresh'`
+不在 dsh-flash monochrome 字形集 `_ICON_PATHS` 内，`_switchIcon` 对未知名字回退渲染字面量文本。
+后续用户又要求：③ 放到 弹窗通知 开关下面；④ 去掉多余 ⚙ 配置按钮；⑤ 系统告警总开关关闭时隐藏。
+收敛方案：图标用 `scroll`；`order: 62`（落在 Toast(order 61) 之下、主机滑杆 80/81 之上）；
+不提供 `config`；`visible: () => _getAlertsOn()`（随系统告警总开关显隐，与上下文监控一致，
+但**不**按 runner 激活态显隐 —— 停止时仍可见、可一键再武装）。
+
+**已完成**
+- [x] `src-client/factory-body.js`：`icon: 'refresh'` → `'scroll'`；`order: 60` → `62`；
+      `config` 字段删除；`visible: true` → `visible: () => _getAlertsOn()`；
+      `getValue` 仍用 `_getRunnerActive()`。
+- [x] `node scripts/build-client.mjs` 重建 `lib/client.js`（183.2kb）：bundle 内 `icon: "scroll"`、
+      `order: 62`、自动继续无 `config`、`visible` 读 `_getAlertsOn()`，无陈旧残留。
+- [x] 同步 README.md / README.zh-CN.md 开关章节、progress.md。
+
+**待办**
+- [ ] `npx tsc --noEmit`、`npx vitest run --pool=threads`、bundle grep 复核（本轮已跑：tsc 0、
+      94/94、无残留）；GUI 浏览器验证快捷面板系统告警下顺序为 系统告警 → 上下文监控 → 弹窗通知 →
+      自动继续（无 ⚙ 按钮、图标 scroll），且系统告警总开关关闭时自动继续整行隐藏、重开后随之出现。
+
+---
+
+## 后续任务：正常结束不再解除守卫（移除 settled 退出条件）（用户最新要求）
+
+**目标**：按用户要求**去掉正常结束这个退出条件**。用户经 `ask_user_question` 确认：**方案 1「改为：正常结束也自动继续」+ 选项 (A)「仅已武装会话」** —— 已武装会话的回合正常收尾**保持武装**、继续待命补发（不 disarm、不弹退出告警）；未武装会话的回合正常收尾**保持未武装**（不会被被动武装，输入继续词入口保留）。
+
+**方案（用户确认）**：与移除询问管线一致，采用**全量删除** settled 退出路径，不留下可复活的陈旧代码：
+- `_handleTurnEnd`：retryable → `_armAutoRetry()`；settled → 已武装会话跳过 re-arm 直落统一尾部继续待命、未武装会话直接 `return`（不 disarm、不被动武装）；统一尾部收敛 `remaining<=0` 冻结 `paused`（`_noteAutoRetryExit('budget')`）或 `_scheduleAutoRetryEmit()`。
+- `AUTO_RETRY_EXIT_REASONS` → `['manual','budget']`（删 `'settled'`）；`autoRetryExitedReasonKey` 删 settled 分支（防御性回退 budget 文案，结构性不可达）；删除 `autoRetryExitedReasonSettled`（zh+en）。
+- 守卫护栏仍在：连续预算默认 4 次冻结 `paused` 等人 + 面板手动「停止」彻底关闭 —— 非无限无人空转。
+
+**已完成**
+- [x] `_handleTurnEnd` 重写、`AUTO_RETRY_EXIT_REASONS`/`autoRetryExitedReasonKey`/i18n settled 清理。
+- [x] `build-client.mjs` 重建（183.1kb）：bundle 含新 `_handleTurnEnd`，退出场景 `settled`/`autoRetryExitedReasonSettled`/`_maybePromptAutoRetry`/`_continuePrompt*` 零残留（`unsettled` 指示器与删除内容无关）。
+- [x] 同步 README×2 / CHANGELOG / docs design / findings / progress / 本文件；不改用户 ` M` 文件。
+
+**待办**
+- [ ] 三门口令通过（本轮已跑：`tsc --noEmit` exit 0、`vitest --pool=threads` 94/94、bundle grep 复核）；GUI 浏览器验证已武装会话跑一个正常回合后自动继续保持开启。
+
+---
+
+## 后续任务：去掉手动「停止自动继续」的退出告警（仅保留 budget 告警）（用户最新要求）
+
+**目标**：用户看到退出告警「已按你的操作停止自动继续（会话 …，工作区 …）」后认为**没信息量**，要求去掉这条告警。经 `ask_user_question` 确认：**仅 manual（推荐）** —— 只去掉手动停止的 🔁 info 弹窗，**budget（连续补发达上限 → paused）**告警保留（它发生在无任何用户操作时，被告知才有意义）。
+
+**边界（必须保留）**：手动「停止自动继续」本身照常**关闭守卫** —— 只是不再弹退出 info 提醒。
+
+**方案（用户确认）**：`AUTO_RETRY_EXIT_REASONS` 收敛为 `['budget']`，让 `_noteAutoRetryExit('manual')` 在入口即 return（静默）；`autoRetryExitedReasonKey` 收敛为单分支恒返回 `autoRetryExitedReasonBudget`；删除 `autoRetryExitedReasonManual` i18n（zh+en）。
+
+**已完成**
+- [x] `src-client/factory-body.js`：`AUTO_RETRY_EXIT_REASONS` → `['budget']`（注释说明手动停止为显式动作、静默站下）；`autoRetryExitedReasonKey` 单分支；删除 `autoRetryExitedReasonManual`（zh+en）；更新 `_noteAutoRetryExit` / `_disarmAutoRetry` / 快速开关 manual-off 注释。
+- [x] `node scripts/build-client.mjs`（182.8kb）与 `npm run build` 均 exit 0：bundle 含 `AUTO_RETRY_EXIT_REASONS=["budget"]` / `autoRetryExitedReasonBudget`，无 `autoRetryExitedReasonManual` / 中英「已按你的操作停止自动继续 / Stopped by your action」残留。
+- [x] 同步 README×2（退出告警段落：仅 budget 弹告警带定位、手动停止不弹）、CHANGELOG、docs/auto-retry-integration-design.zh-CN.md（§5 5b 修订）、progress、本文件；不改用户 ` M` 文件。
+
+**待办**
+- [ ] 三门口令通过（本轮已跑：`tsc --noEmit` exit 0、`vitest --pool=threads` 94/94、bundle grep 无残留）；GUI 浏览器验证：点「停止自动继续」不再弹 🔁 退出告警，连续补发达上限仍弹（budget + 定位后缀）。

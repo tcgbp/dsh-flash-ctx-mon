@@ -13,28 +13,60 @@ hold the settings namespace and schema.
 
 ## Unreleased
 
-**The "open auto-retry?" question is no longer a custom React modal.** After a
-human "continue" message in an unarmed session, the context alert provider now
-publishes an **info-level alert** (`ctx-auto-continue-offer-<ts>`, 🔁,
-dismissible) through the `dshFlashAlerts` registry, so the question is asked via
-dsh-flash's own toast/detail modal — the same surface that shows the monitor's
-warnings. Two actions resolve it without any custom UI:
-- **开启自动继续** (primary) → `armAutoRetry()` for the current session, clear
-  the pending offer, re-emit immediately (removes the alert) and close with a
-  "已开启自动重试" status.
-- **暂不** → record the per-session cooldown (`_continuePromptAt[sid] = now`),
-  clear the pending offer, re-emit immediately and close silently.
+**Typing a bare continue word now arms auto-continue directly — no confirmation
+dialog at all.** In an unarmed session, when you manually send a message that is
+exactly a continue word (`继续` / `continue` / `cont` / `resume` / `res`, case- and
+whitespace-insensitive, configured via `autoRetryContinueText` if you extend the
+set), the guard is armed immediately: your typing the word *is* the opt-in, and
+the resident indicator reflects the now-armed state on the next poll. There is no
+「开启自动继续 / 暂不」prompt, no toast, and no per-session cooldown anymore.
 
-Internal: the `ContinuePromptModal` component, `CONTINUE_BTN`, the
-`openContinuePrompt`/`closeContinuePrompt` renderers and their transient
-`_continuePromptRoot`/`_continuePromptHost` DOM are **fully removed**. The
-`_continuePromptBridge`/`_continuePromptPending` channel is retained, repurposed
-as a data-layer → provider handoff: the provider's `start()` installs an
-immediate-poll handler and `stop()` detaches it by reference; the token source
-exposes `getSessionId()` and its `_reset()` clears a stale pending offer on
-session switch so it never leaks into a new session. `_maybePromptAutoRetry`'s
-guards and cooldown semantics are unchanged, and plain dismissal of the toast
-does not record a cooldown (only the explicit「暂不」button does).
+Internal: the entire offer/confirmation path is **fully removed**, not just
+disabled, so no stale code can ever re-surface a dialog:
+- `_continuePromptBridge`, `_continuePromptPending`, `_continuePromptAt` and
+  `CONTINUE_PROMPT_COOLDOWN_MS` are gone.
+- `_maybePromptAutoRetry` is replaced by `_autoArmOnContinue`, which calls
+  `_armAutoRetry()` directly (arming is idempotent; the caller still short-circuits
+  already-armed sessions).
+- The offer-alert block in `createSessionContextProvider.poll()`, its
+  `_flushOfferPoll` / `_promptHandler` bridge wiring in `start()`/`stop()`, and all
+  cleanup of the pending state in `_reset()`, `_applyInner()` and `dispose()` are
+  removed, along with the now-unused `continuePrompt*` i18n keys.
+
+The prior change (the question moving from a bespoke React modal to a dsh-flash
+info alert) is itself superseded by the above — there is no question to ask
+anymore.
+
+**A normally-settled turn no longer stands the guard down.** A settled `turn/end`
+(neither `error` / `interrupted` / `max-tokens`, and no "让我 / 让我来 / let me"
+handoff stub) now leaves an **already-armed** session armed and waiting, and
+leaves an **unarmed** session unarmed (it is never armed passively). Previously
+such a turn disarmed the guard and fired a 🔁 info exit-alert. This is bounded,
+not an unattended loop: the consecutive budget (`autoRetryMaxConsecutive`, default
+4) still freezes an armed session to `paused`, and **manual stop** still fully
+disarms.
+
+Internal: the `settled` exit reason is fully removed, like the offer path was:
+- `_handleTurnEnd` now: retryable → `_armAutoRetry()`; settled → keep an already-
+  armed guard going or leave an unarmed one untouched (plain `return`, no disarm);
+  then a unified tail handles the budget-freeze and `_scheduleAutoRetryEmit()`.
+- `autoRetryExitedReasonKey` lost its `settled` branch, and the
+  `autoRetryExitedReasonSettled` i18n keys are deleted from zh and en.
+
+**A manual "stop" no longer fires an exit-info alert.** Stopping auto-continue via
+the panel switch (or the continue-word entry's internal disarms) is an explicit
+user action that is already self-evident, so the 🔁 "已按你的操作停止自动继续 /
+Stopped by your action" toast is removed. The stop **still fully disarms** the
+guard — only the informational popup is gone. Budget exhaustion (→ `paused`) is
+the *only* surviving exit-alert reason, since it happens without any user action
+and genuinely benefits from a toast naming the cause.
+
+Internal:
+- `AUTO_RETRY_EXIT_REASONS` is now `['budget']` (the `'manual'` reason is gated
+  out in `_noteAutoRetryExit`, so `disarmAutoRetry('manual')` disarms silently).
+- `autoRetryExitedReasonKey` collapses to a single `autoRetryExitedReasonBudget`
+  branch (only budget survives the gate), and the `autoRetryExitedReasonManual`
+  i18n keys are deleted from zh and en.
 
 ## 0.2.2
 

@@ -172,19 +172,16 @@ window.__ModuleLoader__.load({
       autoRetryArmNow: '立即补发一次（发送“继续”）',
       autoRetryDisarm: '停止自动继续',
       autoRetryHint: '自动继续已开启',
-      // Continue-prompt modal (offered after a manual "continue" message)
-      continuePromptTitle: '开启自动重试？',
-      continuePromptBody: '检测到本次会话发送了“继续”。开启自动重试后，回合异常中断时会自动补发，无需每次手动操作；你也可以随时在本会话中关闭。',
-      continuePromptEnable: '为本次会话开启',
-      continuePromptDecline: '暂不开启',
-      continuePromptArmed: '已开启自动重试',
-      continuePromptClose: '关闭',
       // Auto-continue exited (info alert with the reason)
       alertAutoRetryExited: '已退出自动继续',
-      autoRetryExitedReasonHuman: '检测到人工输入，已停止自动继续',
-      autoRetryExitedReasonManual: '已按你的操作停止自动继续',
-      autoRetryExitedReasonSettled: '回合正常结束，已停止自动继续',
       autoRetryExitedReasonBudget: '已连续自动继续达到上限，暂停等待人工输入',
+      // Location suffix appended to the exited-alert so the user can locate the
+      // workspace + session that just left auto-continue.
+      autoRetryExitedLocSid: '会话 {value}',
+      autoRetryExitedLocWs: '工作区 {value}',
+      autoRetryExitedLocSep: '，',
+      autoRetryExitedLocOpen: '（',
+      autoRetryExitedLocClose: '）',
       // Quick-control switch label (one-click manual off / re-arm)
       autoRetryQuickLabel: '自动继续',
       // Alert preview
@@ -276,19 +273,16 @@ window.__ModuleLoader__.load({
       autoRetryArmNow: 'Continue now (send “continue”)',
       autoRetryDisarm: 'Stop auto-continue',
       autoRetryHint: 'auto-continue active',
-      // Continue-prompt modal (offered after a manual "continue" message)
-      continuePromptTitle: 'Enable auto-retry?',
-      continuePromptBody: 'This session just sent “continue”. With auto-retry on, interrupted turns resend it automatically so you don’t have to — you can switch it off anytime for this session.',
-      continuePromptEnable: 'Enable for this session',
-      continuePromptDecline: 'Not now',
-      continuePromptArmed: 'Auto-retry is on',
-      continuePromptClose: 'Close',
       // Auto-continue exited (info alert with the reason)
       alertAutoRetryExited: 'Auto-continue turned off',
-      autoRetryExitedReasonHuman: 'Detected human input — auto-continue stopped',
-      autoRetryExitedReasonManual: 'Stopped by your action — auto-continue off',
-      autoRetryExitedReasonSettled: 'Turn settled normally — auto-continue stopped',
       autoRetryExitedReasonBudget: 'Reached the auto-continue limit — paused for your input',
+      // Location suffix appended to the exited-alert so the user can locate the
+      // workspace + session that just left auto-continue.
+      autoRetryExitedLocSid: 'session {value}',
+      autoRetryExitedLocWs: 'workspace {value}',
+      autoRetryExitedLocSep: ', ',
+      autoRetryExitedLocOpen: ' (',
+      autoRetryExitedLocClose: ')',
       // Quick-control switch label (one-click manual off / re-arm)
       autoRetryQuickLabel: 'Auto-continue',
       // Alert preview
@@ -332,14 +326,27 @@ window.__ModuleLoader__.load({
       return locale[key] !== undefined ? locale[key] : (LOCALES.en[key] !== undefined ? LOCALES.en[key] : key)
     }
 
-    /** Map an auto-continue exit reason to its i18n key. The default (and any
-     *  unknown reason) resolves to the generic "turn settled" copy so the info
-     *  toast always carries readable, reason-specific detail. */
+    /** Map an auto-continue exit reason to its i18n key. Normal turn completion
+     *  is no longer an exit (see _handleTurnEnd), and a manual stop no longer
+     *  alerts (see AUTO_RETRY_EXIT_REASONS) — the only reason that survives the
+     *  gating in _noteAutoRetryExit is consecutive-budget exhaustion, so this
+     *  always resolves to the budget copy. */
     function autoRetryExitedReasonKey(reason) {
-      return reason === 'human' ? 'autoRetryExitedReasonHuman'
-        : reason === 'manual' ? 'autoRetryExitedReasonManual'
-        : reason === 'budget' ? 'autoRetryExitedReasonBudget'
-        : 'autoRetryExitedReasonSettled'
+      return 'autoRetryExitedReasonBudget'
+    }
+
+    /** Build the location suffix for the "exited auto-continue" alert so the
+     *  user can locate the workspace + session that just left auto-continue.
+     *  Only renders the context that is actually resolvable — the session id is
+     *  always present (the alert only fires for the current session), and the
+     *  workspace path is included when the session list reports one. Returns an
+     *  empty string when neither is available (defensive; should not happen). */
+    function autoRetryExitedLocate(sessionId, workspace) {
+      var bits = []
+      if (sessionId != null && sessionId !== '') bits.push(t('autoRetryExitedLocSid').replace('{value}', String(sessionId)))
+      if (workspace) bits.push(t('autoRetryExitedLocWs').replace('{value}', workspace))
+      if (!bits.length) return ''
+      return t('autoRetryExitedLocOpen') + bits.join(t('autoRetryExitedLocSep')) + t('autoRetryExitedLocClose')
     }
 
     /** Functional label helper — returns a function that calls t() so the label updates on locale change. */
@@ -1158,34 +1165,11 @@ var _PREFS_MAX_RETRIES = 8
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // "Continue → offer auto-retry" bridge (§7 of the design).
-    //
-    // When the user types a bare continue word (「继续」/ "continue") as a HUMAN
-    // message and the current session has NOT yet armed auto-retry, the runner
-    // offers to arm it. The offer is not a modal we can render from the token
-    // source (pure data layer, no React) — so the runner records the offer and
-    // the UI layer mounts it through this module-level bridge, exactly like
-    // _autoRetryStore above. The bridge holds the ONE callable the UI installs
-    // at apply time; while null the offer is simply dropped (no UI present).
-    //
-    // The same per-session cooldown map lives here (module scope) rather than
-    // inside a token source so the "don't nag again" state survives a source
-    // stop/start cycle (a re-bind on session switch resets a source's own vars).
-    var _continuePromptBridge = { handler: null }
-    /** Persist the latest pending offer so the alert provider can surface it as
-     *  an info alert (data-layer → provider channel; see createSessionContextProvider). */
-    var _continuePromptPending = null
-    /** last-offered timestamp per sessionId, to stop re-nagging. */
-    var _continuePromptAt = Object.create(null)
-    /** How long to wait before offering again for the same session (ms). */
-    var CONTINUE_PROMPT_COOLDOWN_MS = 60000
-
-    // ─────────────────────────────────────────────────────────────────────────
     // "Session exited auto-continue" info alert (data-layer → provider channel).
     //
-    // The complement of the continue-offer above: when the CURRENT session leaves
+    // When the CURRENT session leaves
     // an active auto-continue state (armed/scheduled/paused → stopped) for a
-    // user-relevant reason (human input / manual stop / settled turn / budget
+    // user-relevant reason (manual stop / settled turn / budget
     // exhausted), the runner records the exit and the alert provider surfaces it
     // ONCE as an info alert naming the reason. Also module scope so the
     // "don't nag again" cooldown survives a source stop/start cycle on re-bind.
@@ -1195,9 +1179,13 @@ var _PREFS_MAX_RETRIES = 8
     /** How long to wait before alerting again for the same session (ms). */
     var AUTO_RETRY_EXIT_COOLDOWN_MS = 60000
     /** Exit reasons that warrant a user-facing info alert. Anything else
-     *  (internal stand-downs — no session, prompt failure) carries no actionable
-     *  info and stays silent. */
-    var AUTO_RETRY_EXIT_REASONS = ['human', 'manual', 'settled', 'budget']
+     *  (internal stand-downs — no session, prompt failure; a manual "stop"
+     *  which is an obvious user-initiated action) carries no informative value
+     *  and stays silent. A normal turn completion no longer ends the guard, so
+     *  it is not an alert reason either. Consecutive-budget exhaustion is the
+     *  only remaining reason: auto-continue pauses without any user action, so
+     *  a toast naming the cause is genuinely useful. */
+    var AUTO_RETRY_EXIT_REASONS = ['budget']
 
     /**
      * SessionEventTokenSource — reads precise token usage from DSH's session
@@ -1335,10 +1323,24 @@ var _PREFS_MAX_RETRIES = 8
         return _retryBySession[_sessionId] || null
       }
 
+      /** Resolve the workspace (cwd) for a session id from the session list
+       *  store's `byId` row, or null when the session is not listed / reports no
+       *  cwd. Used to let the "exited auto-continue" alert name the workspace
+       *  the user is working in, so it is easy to locate on switch-back. */
+      function _sessionWorkspace(sessionId) {
+        if (!_sessions || !sessionId) return null
+        try {
+          var snap = _sessions.list && _sessions.list.getSnapshot ? _sessions.list.getSnapshot() : null
+          var row = snap && snap.byId && snap.byId[sessionId]
+          return (row && typeof row.cwd === 'string' && row.cwd) ? row.cwd : null
+        } catch (_) { return null }
+      }
+
       /** Record that the bound session just left active auto-continue, so the
-       *  alert provider can surface ONE info toast naming the reason. Only
-       *  user-relevant reasons alert; per-session cooldown (mirrors the
-       *  continue-offer) stops rapid re-entry/exits from spamming. */
+       *  alert provider can surface ONE info toast naming the reason. Only the
+       *  reasons in AUTO_RETRY_EXIT_REASONS alert (currently just budget
+       *  exhaustion — a manual stop is self-evident); per-session cooldown
+       *  (mirrors the continue-offer) stops rapid re-entry/exits from spamming. */
       function _noteAutoRetryExit(reason) {
         if (AUTO_RETRY_EXIT_REASONS.indexOf(reason) < 0) return
         var sid = _sessionId
@@ -1347,15 +1349,20 @@ var _PREFS_MAX_RETRIES = 8
         var last = _autoRetryExitedAt[sid]
         if (typeof last === 'number' && now - last < AUTO_RETRY_EXIT_COOLDOWN_MS) return
         _autoRetryExitedAt[sid] = now
-        _autoRetryExitedPending = { sessionId: sid, reason: reason, at: now }
+        _autoRetryExitedPending = {
+          sessionId: sid,
+          reason: reason,
+          at: now,
+          workspace: _sessionWorkspace(sid),
+        }
       }
 
       /** Drop the guard entirely: stop any pending emission and forget the
        *  session's consecutive budget. Used on genuine human input (§5.5),
-       *  on non-retryable turn/end, and on a manual disarm. When the record
-       *  being dropped was actually ACTIVE (armed/scheduled/paused) and the
-       *  caller provides a user-relevant `reason` (human/manual/settled), one
-       *  info alert is surfaced explaining why auto-continue was turned off. */
+       *  on non-retryable turn/end, and on a manual disarm. Only a
+       *  consecutive-budget exhaustion surfaces an info alert (via
+       *  _noteAutoRetryExit('budget') in _handleTurnEnd); a manual disarm,
+       *  being an explicit user action, is not re-announced. */
       function _disarmAutoRetry(reason) {
         _retryTimersClear()
         if (_sessionId && _retryBySession[_sessionId]) {
@@ -1392,18 +1399,6 @@ var _PREFS_MAX_RETRIES = 8
         // Persist the choice: this session is now armed, so switching away
         // then back (or reloading) must restore it instead of resetting it.
         _writeAutoRetryPref(_sessionId, true)
-        // A session that is already (or newly) armed must never be asked the
-        // "是否开启自动继续" (enable auto-continue?) question — the choice was
-        // made and persisted. Retire any pending offer for THIS session, and
-        // route the retraction to the provider so a stale toast re-emitted on
-        // return to an originally-auto-continuing session goes quiet instead
-        // of prompting again.
-        if (_continuePromptPending && _continuePromptPending.sessionId === _sessionId) {
-          _continuePromptPending = null
-          if (_continuePromptBridge && typeof _continuePromptBridge.handler === 'function') {
-            try { _continuePromptBridge.handler() } catch (_) {}
-          }
-        }
         _publishAutoRetryView()
       }
 
@@ -1531,18 +1526,29 @@ var _PREFS_MAX_RETRIES = 8
         _publishAutoRetryView()
       }
 
-      /** turn/end hook: retryable ends arm + schedule; any other end while
-       *  armed means the turn settled on its own and the guard stands down.
-       *  Retryable is broader than the raw reason kind: a turn that ended on a
-       *  handoff stub ("让我 / 让我来 / let me …" tail with nothing after it) is
-       *  also worth an automatic continue (§5.1 + handoff-stub fallback). */
+      /** turn/end hook: a retryable end (error / interrupted / max-tokens, or a
+       *  handoff-stub tail "让我 / 让我来 / let me …" with nothing after it,
+       *  §5.1 + handoff-stub fallback) arms the guard and schedules a continue.
+       *  Product decision (2026-11-14): a NORMAL completion is no longer a
+       *  stand-down exit condition. If the guard is ALREADY armed, a settled
+       *  turn keeps it armed and simply schedules the next continue (only the
+       *  consecutive budget — frozen to paused — or a manual stop ends it). An
+       *  UNARMED session's normal completion stays unarmed: it is never
+       *  passively armed by a plain finished turn (the user still opts in by
+       *  typing a continue word, or by a retryable failure). */
       function _handleTurnEnd(reason) {
         try {
           var turnRetryable = isRetryableEnd(reason) || isHandoffStub(_lastAssistantText)
-          if (!turnRetryable) { _disarmAutoRetry('settled'); return }
-          _armAutoRetry()
+          if (!turnRetryable) {
+            // Normal completion. Keep going only if the guard is already armed
+            // (and not frozen); otherwise leave the unarmed session alone.
+            var prearmed = _activeAutoRetryRecord()
+            if (!prearmed || !prearmed.armed || prearmed.paused) return
+          } else {
+            _armAutoRetry()
+          }
           var rec = _activeAutoRetryRecord()
-          if (!rec) return
+          if (!rec || !rec.armed || rec.paused) return
           if (rec.remaining <= 0) {
             // Budget exhausted: freeze at "paused" until a human takes over.
             // From the user's viewpoint auto-continue has stood down, so alert
@@ -1562,9 +1568,13 @@ var _PREFS_MAX_RETRIES = 8
         }
       }
 
-      /** user/message hook: an entry is either our own continue echoed back
-       *  (matched exactly by rpcId + text + window, §5.4) — in which case the
-       *  guard quietly stays armed — or genuine human input, which disarms. */
+      /** user/message hook: OUR OWN continue echoed back is matched exactly
+       *  (rpcId + text + window, §5.4) so the guard's echo-tracking advances.
+       *  Any other message is genuine human input — which per product decision
+       *  does NOT stand the guard down: a human steering the conversation keeps
+       *  auto-continue armed so a later retryable end still auto-continues. The
+       *  guard only stands down on its own (turn settles, budget exhausts) or
+       *  by an explicit "stop". */
       function _handleUserMessage(entry, time) {
         try {
           var rec = _activeAutoRetryRecord()
@@ -1583,9 +1593,9 @@ var _PREFS_MAX_RETRIES = 8
             }
             return
           }
-          // Not our echo → real human words → hand the wheel back.
-          console.log('[dsh-flash-ctx-mon] user message while armed does not match self-echo — disarming auto-retry')
-          _disarmAutoRetry('human')
+          // Genuine human input while armed: keep the guard armed (deliberate
+          // decision — human typing is not an auto-continue exit condition).
+          // Nothing to do here; the guard resumes on the next retryable end.
         } catch (e) {
           // Non-fatal: malformed entries must not break the event loop.
         }
@@ -1657,22 +1667,25 @@ var _PREFS_MAX_RETRIES = 8
        *  Matches the configured continue text plus the conventional Chinese and
        *  English equivalents, case- and whitespace-insensitively. Deliberately
        *  only matches when the ENTIRE message is that word (no trailing prose),
-       *  so a real instruction that merely mentions "continue" is never offered. */
+       *  so a real instruction that merely mentions "continue" is never armed. */
       function _matchesContinueWord(text) {
         var n = _normalizeContinue(text)
         if (!n) return false
         var configured = _alertStr('autoRetryContinueText')
         if (_normalizeContinue(configured) === n) return true
         return n === '继续' || n === 'continue' || n === 'cont'
+          || n === 'resume' || n === 'res'
       }
 
-      /** user/message companion hook: when auto-retry is NOT armed and the human
-       *  typed a bare continue word into THIS session, offer to arm it. Runs in
-       *  every state (not only armed like _handleUserMessage) so the offer can
-       *  surface before any failure has happened. Self-echoed continue messages
-       *  injected by an ALREADY armed runner never reach this point because the
-       *  caller short-circuits armed sessions. Per-session cooldown stops nagging. */
-      function _maybePromptAutoRetry(entry, time) {
+      /** user/message companion hook: when auto-retry is NOT already armed and
+       *  the human typed a bare continue word ("继续 / continue / resume") into
+       *  THIS session, ARM auto-continue immediately — no confirmation dialog,
+       *  the user typing the continue word IS the explicit opt-in. Runs in every
+       *  state (not only armed like _handleUserMessage) so the mode opens before
+       *  any failure has happened. Self-echoed continue messages injected by an
+       *  ALREADY armed runner never reach this point because the caller
+       *  short-circuits armed sessions (arming is idempotent regardless). */
+      function _autoArmOnContinue(entry, time) {
         try {
           var rec = _activeAutoRetryRecord()
           if (rec && rec.armed) return                    // already running
@@ -1680,17 +1693,12 @@ var _PREFS_MAX_RETRIES = 8
           if (!text || !_matchesContinueWord(text)) return
           var sid = _sessionId
           if (!sid) return
-          var now = Date.now()
-          var last = _continuePromptAt[sid]
-          if (typeof last === 'number' && now - last < CONTINUE_PROMPT_COOLDOWN_MS) return
-          // The runner (data layer) cannot render — just record + forward.
-          _continuePromptAt[sid] = now
-          _continuePromptPending = { sessionId: sid, text: text, at: now }
-          if (_continuePromptBridge && typeof _continuePromptBridge.handler === 'function') {
-            try { _continuePromptBridge.handler(_continuePromptPending) } catch (_) {}
-          }
+          // Typing a bare continue word opens auto-continue directly. The runner
+          // (data layer) cannot render — arming just records + publishes; the
+          // resident indicator reflects the now-armed state on the next poll.
+          _armAutoRetry()
         } catch (e) {
-          // Non-fatal: the offer must never disrupt message processing.
+          // Non-fatal: arming must never disrupt message processing.
         }
       }
 
@@ -1997,7 +2005,7 @@ var _PREFS_MAX_RETRIES = 8
                 // is a deliberate human take-over, so it must NOT re-offer.
                 var enteredArmed = !!(_activeAutoRetryRecord() && _activeAutoRetryRecord().armed)
                 _handleUserMessage(logEntry, typeof ev.time === 'number' ? ev.time : Date.now())
-                if (!enteredArmed) _maybePromptAutoRetry(logEntry, typeof ev.time === 'number' ? ev.time : Date.now())
+                if (!enteredArmed) _autoArmOnContinue(logEntry, typeof ev.time === 'number' ? ev.time : Date.now())
               }
             } catch (e) {
               // Non-fatal: malformed user/message payload
@@ -2058,9 +2066,6 @@ var _PREFS_MAX_RETRIES = 8
         _model = null
         _contextWindow = null
         _contextWindowModel = null
-        // Drop any pending auto-continue offer: it belongs to the session we are
-        // unbinding from, so it must never spill into a newly bound session.
-        _continuePromptPending = null
       }
 
       function _bindToSession() {
@@ -2861,58 +2866,8 @@ var _PREFS_MAX_RETRIES = 8
           }
         }
 
-        // Continue-offer as an info alert: after a human "continue" message in
-        // the CURRENT (still-not-armed) session, the data layer records a
-        // pending offer. Surface it as an info-level alert so dock-flash's own
-        // toast/detail modal handles the yes/not-now choice — no custom modal.
-        // Re-emitted on every poll, but the registry only toasts a genuinely-new
-        // id, so once shown it stays quiet; the two actions below resolve it.
-        var pendingOffer = _continuePromptPending
-        if (pendingOffer && typeof pendingOffer.sessionId !== 'undefined'
-            && pendingOffer.sessionId === (tokenSource && tokenSource.getSessionId ? tokenSource.getSessionId() : null)) {
-          var offerAt = typeof pendingOffer.at === 'number' ? pendingOffer.at : Date.now()
-          alerts.push({
-            id: 'ctx-auto-continue-offer-' + offerAt,
-            severity: 'info',
-            title: function () { return t('continuePromptTitle') },
-            message: function () { return t('continuePromptBody') },
-            icon: '🔁',
-            timestamp: offerAt,
-            dismissible: true,
-            actions: [
-              {
-                id: 'auto-continue-enable',
-                label: function () { return t('continuePromptEnable') },
-                primary: true,
-                onClick: function () {
-                  var src = _activeTokenSource
-                  if (src && typeof src.armAutoRetry === 'function') {
-                    try { src.armAutoRetry() } catch (_) {}
-                  }
-                  _continuePromptPending = null
-                  _flushOfferPoll()
-                  return { message: t('continuePromptArmed'), close: true }
-                },
-              },
-              {
-                id: 'auto-continue-decline',
-                label: function () { return t('continuePromptDecline') },
-                primary: false,
-                onClick: function () {
-                  if (_continuePromptPending) {
-                    _continuePromptAt[_continuePromptPending.sessionId] = Date.now()
-                  }
-                  _continuePromptPending = null
-                  _flushOfferPoll()
-                  return { message: null, close: true }
-                },
-              },
-            ],
-          })
-        }
-
         // "Session exited auto-continue" info alert — the complement of the
-        // offer above. When the data layer records that the CURRENT session left
+        // former continue-offer above. When the data layer records that the CURRENT session left
         // active auto-continue for a user-relevant reason, surface ONE info toast
         // naming that reason. The pending is CLAIMED on first read (nulled), so
         // the alert is emitted exactly once and, after it leaves the registry
@@ -2925,7 +2880,11 @@ var _PREFS_MAX_RETRIES = 8
             id: 'ctx-auto-continue-exited-' + exitedAt,
             severity: 'info',
             title: function () { return t('alertAutoRetryExited') },
-            message: function () { return t(autoRetryExitedReasonKey(exitedPending.reason)) },
+            message: function () {
+              var reasonText = t(autoRetryExitedReasonKey(exitedPending.reason))
+              var locate = autoRetryExitedLocate(exitedPending.sessionId, exitedPending.workspace)
+              return locate ? reasonText + locate : reasonText
+            },
             icon: '🔁',
             timestamp: exitedAt,
             dismissible: true,
@@ -2956,18 +2915,6 @@ var _PREFS_MAX_RETRIES = 8
         timer = setTimeout(poll, nextInterval)
       }
 
-      /** Immediately (re)run poll(), bypassing the adaptive timer. Used to
-       *  surface or retire the auto-continue offer alert the instant the data
-       *  layer records/resolves it, instead of waiting a poll interval. */
-      function _flushOfferPoll() {
-        if (timer) { clearTimeout(timer); timer = null }
-        if (callback) { try { poll() } catch (_) {} }
-      }
-
-      /** The handler this provider installs into _continuePromptBridge. Held
-       *  by reference so stop() can detach it without nuking a newer handler. */
-      var _promptHandler = function () { _flushOfferPoll() }
-
       return {
         id: 'dsh-flash-ctx-mon:context-alert',
         start: function (cb, ctx) {
@@ -2976,11 +2923,6 @@ var _PREFS_MAX_RETRIES = 8
           tokenSource = createSessionEventTokenSource()
           tokenSource.start(ctx)
           _activeTokenSource = tokenSource
-          // Route the data layer's continue-offer to an immediate poll so the
-          // info alert surfaces the moment the human types "continue" (the
-          // adaptive poll alone could delay it by a whole interval). Cleared in
-          // stop() so a dead provider is never called.
-          _continuePromptBridge.handler = _promptHandler
           // A skill is used between polls, and the adaptive interval can be
           // longer than the freshness window a notice is judged against (base
           // 20s doubles to ~22s in precise mode). Poll as soon as the tracker
@@ -2995,10 +2937,6 @@ var _PREFS_MAX_RETRIES = 8
           poll()
         },
         stop: function () {
-          // Only clear the bridge if it still points at THIS provider's handler.
-          if (_continuePromptBridge && _continuePromptBridge.handler === _promptHandler) {
-            _continuePromptBridge.handler = null
-          }
           callback = null
           if (timer) { clearTimeout(timer); timer = null }
           if (skillUnsub) { try { skillUnsub() } catch (_) {} skillUnsub = null }
@@ -4860,13 +4798,6 @@ var _PREFS_MAX_RETRIES = 8
       async _applyInner(ctx) {
         _prefCtx = ctx
 
-        // 0. The continue-prompt bridge is now wired by the alert provider
-        //    (createSessionContextProvider.start installs an immediate-poll
-        //    handler; the custom React modal is gone, the offer is surfaced as
-        //    a dsh-flash info alert). Nothing to install here — just clear any
-        //    leftover pending state so a fresh apply never shows a stale offer.
-        _continuePromptPending = null
-
         // 0b. Wire the resident flash-icon indicator into the auto-retry view
         //     bridge. Every _publishAutoRetryView() → store.notify(view) mirrors
         //     the state onto the <html> root so the cross-plugin stylesheet can
@@ -4957,16 +4888,33 @@ var _PREFS_MAX_RETRIES = 8
             var dispose = registry.registerSwitch({
               id: RUNNER_QUICK_KEY,
               label: L('autoRetryQuickLabel'),
-              icon: 'refresh',
+              // 'scroll' is in dsh-flash's monochrome glyph set (_ICON_PATHS in
+              // its client): it reads as "keep going / continue", matching
+              // auto-continue, and is visually distinct from the context
+              // monitor switch which uses 'message'. Do NOT use 'refresh' —
+              // dsh-flash has no refresh glyph, so _switchIcon falls back to
+              // rendering the literal text and the row shows "refresh".
+              icon: 'scroll',
               type: 'toggle',
               group: 'system',
               cluster: 'system-alerts',
-              order: 60,
-              // Visible only while the CURRENT session actually has
-              // auto-continue active — it is a "manual off"/"re-arm" control,
-              // not a permanent row.
-              visible: function () { return _getRunnerActive() },
-              config: function () { openMonitorConfig('context') },
+              // Placed directly BELOW the 弹窗通知 (Toast) switch in the
+              // system-alerts cluster. Cluster rows sort by `order` ascending
+              // (57 system-alerts, 59 monitor-context, 61 alert-toast, then
+              // this), so 62 keeps auto-continue right under the Toast toggle
+              // and above the host sliders (80/81, hidden in the compact strip).
+              order: 62,
+              // Visible whenever dsh-flash's 系统告警 master toggle is ON — the
+              // panel re-evaluates every row's visible() on any notifyChange, so
+              // this row stands down the moment 系统告警 is switched off, exactly
+              // like the 上下文监控 switch. It is NOT gated on the runner's active
+              // state: even while stopped the row stays visible (while master is
+              // on) so the user always has a one-click re-arm entry — it reflects
+              // the current session's auto-continue state via getValue instead.
+              // No `config`: the ⚙ 配置 button belongs to the 上下文监控 switch
+              // only — a bare one-shot auto-continue toggle has nothing to
+              // configure.
+              visible: function () { return _getAlertsOn() },
               getValue: function () { return _getRunnerActive() },
               setValue: function (v) {
                 var src = _activeTokenSource
@@ -4975,8 +4923,9 @@ var _PREFS_MAX_RETRIES = 8
                   if (v) {
                     if (typeof src.armAutoRetry === 'function') src.armAutoRetry()
                   } else if (typeof src.disarmAutoRetry === 'function') {
-                    // Manual off → 'manual' reason → surfaces the info alert
-                    // "已按你的操作停止自动继续 / Stopped by your action".
+                    // Manual off → disarmAutoRetry('manual'). It disarms the
+                    // guard but does NOT toast: the stop was user-initiated, so
+                    // no informational alert is needed (see AUTO_RETRY_EXIT_REASONS).
                     src.disarmAutoRetry()
                   }
                 } catch (_) {}
@@ -5064,8 +5013,6 @@ var _PREFS_MAX_RETRIES = 8
 
       dispose() {
         closeMonitorConfig()
-        _continuePromptBridge.handler = null
-        _continuePromptPending = null
         _clearAutoRetryDomIndicator()
         _autoRetryStore = null
         _clearUnsettledDomIndicator()

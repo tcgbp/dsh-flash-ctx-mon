@@ -55,7 +55,7 @@
 - `scheduleCooldown` / `inCooldown`；`makeDisarmedState` / `armState`（纯状态构造器）。
 - 状态机：`stopped | armed | scheduled | paused`；状态按 sessionId 隔离于 `_retryBySession`。
 - 单发射 guard：`_retryTimer`（一个 setTimeout，一次只能有一个 pending emit）；`_scheduleAutoRetryEmit` 只在 armed 且不在 cooldown 时安排，backoff 从 record level 派生。
-- 用户回流/继续：`_handleTurnEnd(reason)` —— retryable end 才 arm+schedule；非 retryable → disarm；remaining<=0 → 冻结 paused 等人接手。
+- 用户回流/继续：`_handleTurnEnd(reason)` —— retryable end 才 arm+schedule；settled 回合对**已武装**会话保持 armed 继续待命、对**未武装**会话保持 unarmed（都不 disarm，也不被动武装）；remaining<=0 → 冻结 paused 等人接手。
 - 注入回话：attemptSeq = `rec.maxConsecutive - rec.remaining + 1`；`requestIdForAttempt(_retryRequestIdCache, retryAttemptKey(sessionId, attemptSeq), gen)` 幂等生成 requestId；`source = { kind:'user', rpcId: requestId, autocontinue: true }` —— 自回显检测靠同一 rpcId。
 - `_activeTokenSource`=null 声明；`_autoRetryStore` live bridge（UI 层创建）驱动 overlay guard；`stop()` 清 `_retryBySession` 与 `_retryRequestIdCache`。
 - Runner 组合 INLINE 于 token source 之上，复用 `_sessions/_sessionId/_ctx` 与 `session.prompt(...)`（长度>=2 用数组参数否则 `{content}` 形状）。

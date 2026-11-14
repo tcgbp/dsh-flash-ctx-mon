@@ -75,6 +75,17 @@ Monitor**:
 (`getItem(key) !== '0'`). The host's own fields are all `volatile()`, so DSH resets them
 to their defaults on every restart — the browser is what remembers your choice.
 
+Below it sits the **Auto-continue** row (`dsh-flash-ctx-mon:auto-continue`, monochrome `scroll`
+glyph, directly under the 弹窗通知 / Toast switch) as a per-session on/off switch: **on** arms
+auto-continue for the current session (`armAutoRetry()`), **off** stops it
+(`disarmAutoRetry()`). It is shown whenever the **System Alerts** master toggle is ON — turning
+that master off stands this row down, exactly like the Context row, and re-enabling it brings the
+row back. It is **not** gated on "only while auto-continue is running", so you can reach it even
+when the guard is stopped; the toggle's selected state live-reflects the current session's
+armed / scheduled / paused state. The row has **no ⚙ Config button** (that belongs to the Context
+row only). The glyph must be one of dsh-flash's known `_ICON_PATHS` names — `'refresh'` is not
+one, and `_switchIcon` would render its literal text, so we use a supported name instead.
+
 ## The config modal
 
 **Configure** beside the switch opens the context monitor panel:
@@ -165,16 +176,10 @@ with the context monitor switched off.
 
 ## Auto-continue
 
-When, in an **unarmed** session, you send a human "continue" message, this plugin asks
-whether to enable auto-continue — and it does so **without a bespoke modal**: it reuses
-dsh-flash's **info-level alert** by publishing a 🔁 `info` alert into the `dshFlashAlerts`
-registry, so dsh-flash's own toast/detail modal (the same surface the monitor's warnings
-use) carries the question, with two buttons:
-
-- **开启自动继续 / Enable auto-continue** — arms the guard for the current session, echoes an
-  "auto-continue armed" status and closes;
-- **暂不 / Not now** — closes silently and records a cooldown for that session (so it won't
-  re-ask within 60 s).
+When, in an **unarmed** session, you send a **bare continue word** (`继续` / `continue` / `cont`
+/ `resume` / `res` — the whole message is that word, nothing else), **auto-continue turns on
+directly** — there is no confirmation dialog: you typing the continue word *is* the explicit
+opt-in, and the resident indicator reflects the now-armed state right away.
 
 Once armed, whenever a turn ends by a **retryable** criterion (after the `autoRetryGraceMs`
 grace, then spaced by `autoRetryCooldownMs` with exponential backoff) the guard re-emits a
@@ -191,27 +196,41 @@ next one fresh in the "stopped" state.
 
 The guard is released in two tiers: **fully off (disarmed)** and **paused for human input**.
 
+**Detected human input is no longer an exit condition** — while armed, a message that is not the
+auto "continue" self-echo leaves the guard **armed** and does not consume the consecutive budget;
+the next retryable `turn/end` auto-continues as usual.
+
+**A normally-settled turn no longer stands the guard down either** — when `turn/end` fires for a
+reason that is neither `error` / `interrupted` / `max-tokens`, and the final assistant output does
+not open with "让我 / 让我来 / let me" (no handoff stub), the turn has actually finished, so there
+is nothing more to auto-send — the guard simply **stays armed and keeps waiting**. Because the work
+is already done, this does not spin up an endless loop: the consecutive budget below still pauses
+it, and your **manual stop** still disarms it. An **unarmed** session that settles normally stays
+unarmed (it is never armed passively) — the type-a-continue-word entry point remains for when you
+want it.
+
 It is **fully turned off** when:
 
-1. **Genuine human input** — while armed, the session receives a message that is **not** the
-   auto "continue" self-echo; the wheel is handed back to you and the guard (and its
-   consecutive budget) is forgotten.
-2. **The turn settles on its own** — `turn/end` fires for a reason that is neither `error` /
-   `interrupted` / `max-tokens`, and the final assistant output does not open with
-   "让我 / 让我来 / let me" (no handoff stub), meaning the turn actually finished.
-3. **Manual stop** — you press "Stop auto-continue".
-4. **The auto-send cannot run** — no prompt-capable session is reachable, the continue text
+1. **Manual stop** — you press "Stop auto-continue".
+2. **The auto-send cannot run** — no prompt-capable session is reachable, the continue text
    is empty, or the `prompt` injection throws (it silently stands down rather than spin).
 
 It **pauses (but stays conceptually armed)** when:
 
-5. **The consecutive budget is exhausted** — after `autoRetryMaxConsecutive` (default 4)
+3. **The consecutive budget is exhausted** — after `autoRetryMaxConsecutive` (default 4)
    continues still did not finish, it freezes in the `paused` state (solid red ring) waiting
-   for you; your next message hits case 1 and fully clears the guard with a fresh budget.
+   for you; your next message does not close the guard, it just resumes it from `paused`.
 
 Note: while armed but inside the **cooldown window** (`autoRetryCooldownMs`) or **already
 scheduled** (counting down grace/backoff), the guard simply stays armed and idle — that is
 not a turn-off.
+
+Only **consecutive-budget exhaustion** (→ `paused`) — a stand-down that happens with no
+user action — shows a 🔁 `info` alert naming the reason and appending **location info**:
+`(session <session-id>, workspace <cwd>)`, so when you come back from another session you can
+instantly tell which workspace/session got parked that way. Pressing **"Stop auto-continue"**
+is your own explicit action and is self-evident, so that manual stop does **not** toast — the
+disarm itself still works exactly as before.
 
 ## Settings
 
