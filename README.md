@@ -219,7 +219,13 @@ It **pauses (but stays conceptually armed)** when:
 
 3. **The consecutive budget is exhausted** — after `autoRetryMaxConsecutive` (default 4)
    continues still did not finish, it freezes in the `paused` state (solid red ring) waiting
-   for you; your next message does not close the guard, it just resumes it from `paused`.
+   for you. It stays parked **until you explicitly opt back in**: flipping the quick-panel
+   "Auto-continue" switch ON, or clicking the small **↻ chip pinned to the icon's bottom-right
+   corner** (visible only while paused), or sending a bare continue word again, **re-opens** it —
+   the budget is re-seeded to a fresh `autoRetryMaxConsecutive` and the ring turns back to the
+   armed "waiting" state. A parked session is never re-opened on its own; only your choice
+   to start it again does. A human steering message resumes it from `paused` without closing
+   the guard (and without consuming budget).
 
 Note: while armed but inside the **cooldown window** (`autoRetryCooldownMs`) or **already
 scheduled** (counting down grace/backoff), the guard simply stays armed and idle — that is

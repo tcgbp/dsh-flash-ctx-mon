@@ -1,5 +1,34 @@
 # 进度日志
 
+## 会话：已中断/已暂停(paused)会话可重新开启自动继续
+
+### 需求与用户确认
+- 用户问：**已中断状态会话为什么无法开启自动继续模式**（观察「开关打不开」）。
+- 诊断：`interrupted` 本身是「可重试结束」之一（`error/interrupted/max-tokens`），**不是**被它拦下的；
+  真正拦路的是**连续预算耗尽后冻结在 `paused`**（记录仍 `armed: true`，`remaining<=0`）——
+  旧 `_armAutoRetry` 只在 `!rec.armed` 时才重新播种预算，导致开关/继续词对 paused 都是**静默空操作**；且 resident 面板 `armDisabled` 对 paused/stopped 一律禁用。
+- 经 `ask_user_question` 确认修复方向：**允许把已暂停(paused)的会话重新武装（推荐）** —— 显式用户动作重新播种预算并解除 paused，保留「预算防烧钱」护栏。
+
+### 已执行操作
+- [x] `src-client/factory-body.js`：
+  - `_armAutoRetry(force)`：新增 `force` 分支 —— `armed && paused`（预算耗尽）时清掉 `paused`/`pending`/`nextEmitAtMs`/`backoffLevel`/`cooldownUntil`/`lastRequestId`/`echoedAt`，把 `remaining` 重新播种为新的 `autoRetryMaxConsecutive`，并更新 doc 注释。
+  - 显式用户路径（公共 `armAutoRetry`、`_autoArmOnContinue`）带 `force=true`；
+    `_handleTurnEnd`（可重试结束自动再武装）与重绑时按持久化偏好恢复**不带 force** —— 被挂起会话不会自行复活。
+  - `armDisabled` 改为：仅无 view/source、`scheduled`（已排程）、或已 armed 且仍有预算时禁用；`stopped` 与 `paused` 均可点「立即武装」重新开启。
+- [x] `node scripts/build-client.mjs` 重建 `lib/client.js`（183.7kb）：bundle 含 `force && rec.paused` 再武装分支、新 `armDisabled`、`_armAutoRetry(true)`。
+- [x] 更新 CHANGELOG.md Unreleased（新增「被预算挂起的会话可重新开启」段 + internal）、README.md / README.zh-CN.md（paused 段：显式重新开启并重播预算）、docs/auto-retry-integration-design.zh-CN.md（§5 新增 5c）。
+
+### 测试
+- [x] `npx tsc -p tsconfig.json --noEmit`（exit 0）。
+- [x] `npx vitest run --pool=threads`：**94/94**。
+- [x] `node scripts/build-client.mjs` exit 0。
+
+### 约束遵守
+- 仅改动本方文件；未触碰用户 dsh-flash 重构 ` M` 文件；未设置 `sandbox_permissions`。
+
+### 待办
+- [ ]（如需要）GUI 刷新验证：把预算烧尽挂起的会话拨「自动继续」开关（或点「立即武装」）→ 状态从红色 paused 回到绿色待命并继续自动补发；未武装/已武装会话行为不受影响。
+
 ## 会话：（未提交待续）去掉「已退出自动继续」手动停止退出告警
 
 ### 需求与用户确认

@@ -166,6 +166,7 @@ window.__ModuleLoader__.load({
       autoRetryStateArmed: '待命中',
       autoRetryStateScheduled: '已排程',
       autoRetryStatePaused: '已暂停，等待人工输入',
+      autoRetryRearmHint: '重新开启自动继续（预算重置为满，恢复待命）',
       autoRetryAccumLabel: '累计重试',
       autoRetryCooldownLabel: '冷却剩余',
       autoRetryScheduledLabel: '即将补发',
@@ -267,6 +268,7 @@ window.__ModuleLoader__.load({
       autoRetryStateArmed: 'Armed',
       autoRetryStateScheduled: 'Scheduled',
       autoRetryStatePaused: 'Paused — waiting for you',
+      autoRetryRearmHint: 'Re-open auto-continue (resets the budget and returns to armed)',
       autoRetryAccumLabel: 'Retried',
       autoRetryCooldownLabel: 'Cooldown',
       autoRetryScheduledLabel: 'Sends in',
@@ -976,6 +978,8 @@ var _PREFS_MAX_RETRIES = 8
     //   - armed     → a steady pulsing GREEN glow ring  (auto-continue on deck)
     //   - scheduled → a faster flashing ORANGE glow     (auto-send imminent)
     //   - paused    → a solid RED ring (no pulse)       (auto-continue halted)
+    //                 + a small ↻ re-arm chip on the bottom-right corner that
+    //                 restores green (armed) on click (explicit re-open).
     //   - stopped   → no effect, attributes removed
     //
     // The mechanism stays additive and DOM-light: every auto-retry view
@@ -1034,6 +1038,22 @@ var _PREFS_MAX_RETRIES = 8
           'html[data-ctx-mon-autoretry=armed] [data-dsh-flash-trigger][data-ctx-mon-autoretry-attempt]::after{background:rgba(47,158,68,1);}',
           'html[data-ctx-mon-autoretry=scheduled] [data-dsh-flash-trigger][data-ctx-mon-autoretry-attempt]::after{background:rgba(232,89,12,1);animation:ctxmon-badge-pulse .9s ease-in-out infinite;}',
           'html[data-ctx-mon-autoretry=paused] [data-dsh-flash-trigger][data-ctx-mon-autoretry-attempt]::after{background:rgba(224,49,49,1);}',
+          // Re-arm chip pinned to the bottom-right corner of the icon, present
+          // only while paused. It is a real (role=button) element so it carries
+          // a click handler (see _placeAutoRetryRearm) — pure CSS cannot host a
+          // click, so the chip is injected/removed from JS on each publish.
+          'html[data-ctx-mon-autoretry=paused] [data-dsh-flash-trigger]{position:relative !important;overflow:visible !important;}',
+          'html[data-ctx-mon-autoretry=paused] [data-dsh-flash-trigger] [data-ctx-mon-rearm]{' +
+            'position:absolute;right:-3px;bottom:-3px;min-width:16px;height:16px;box-sizing:border-box;' +
+            'padding:0;border-radius:999px;background:rgba(224,49,49,1);color:#fff;' +
+            'outline:none;font-size:10px;line-height:16px;text-align:center;cursor:pointer;' +
+            'box-shadow:0 0 0 2px rgba(255,255,255,.9),0 0 6px 1px rgba(224,49,49,.55);' +
+            'z-index:2;display:block;user-select:none;font-weight:900;' +
+          '}',
+          'html[data-ctx-mon-autoretry=paused] [data-dsh-flash-trigger] [data-ctx-mon-rearm]:hover,' +
+          'html[data-ctx-mon-autoretry=paused] [data-dsh-flash-trigger] [data-ctx-mon-rearm]:focus{' +
+            'background:rgba(47,158,68,1);box-shadow:0 0 0 2px rgba(255,255,255,.9),0 0 8px 2px rgba(47,158,68,.7);' +
+          '}',
         ].join('\n')
         document.head.appendChild(style)
         _autoRetryIndicatorStyle = style
@@ -1052,6 +1072,7 @@ var _PREFS_MAX_RETRIES = 8
       var root = document.documentElement
       var state = view && view.state
       if (!state || state === 'stopped') {
+        _placeAutoRetryRearm(false)
         root.removeAttribute('data-ctx-mon-autoretry')
         root.removeAttribute('data-ctx-mon-autoretry-attempt')
         try { root.style.removeProperty('--ctxmon-ratio') } catch (_) {}
@@ -1067,6 +1088,7 @@ var _PREFS_MAX_RETRIES = 8
       if (state !== 'armed' && state !== 'scheduled' && state !== 'paused') return
       _ensureAutoRetryIndicatorStyle()
       root.setAttribute('data-ctx-mon-autoretry', state)
+      _placeAutoRetryRearm(state === 'paused')
       var idx = (view && view.attemptIndex) || 0
       var max = (view && view.maxConsecutive) || 0
       var label = max > 0 ? (idx + '/' + max) : ('attempt ' + idx)
@@ -1087,8 +1109,45 @@ var _PREFS_MAX_RETRIES = 8
       } catch (_) {}
     }
 
+    /** Inject (or remove) the small re-arm chip pinned to the bottom-right corner
+     *  of the resident flash trigger icon. It exists ONLY while the guard is
+     *  parked at `paused` (consecutive budget exhausted): clicking (or
+     *  Enter/Space on) it is an explicit user re-arm that re-seeds the budget and
+     *  flips the ring back to green (armed). Pure CSS cannot host the click, so
+     *  the chip — a real role=button element — is created/removed here on every
+     *  publish, and removed again on dispose. */
+    function _placeAutoRetryRearm(paused) {
+      if (typeof document === 'undefined' || !document.querySelectorAll) return
+      try {
+        function rearm() { try { _armAutoRetry(true) } catch (_) {} }
+        var hosts = document.querySelectorAll('[data-dsh-flash-trigger]')
+        for (var i = 0; i < hosts.length; i++) {
+          var host = hosts[i]
+          var chip = host && host.querySelector ? host.querySelector('[data-ctx-mon-rearm]') : null
+          if (!paused) {
+            if (chip && chip.remove) chip.remove()
+            continue
+          }
+          if (chip) continue
+          chip = document.createElement('span')
+          chip.setAttribute('data-ctx-mon-rearm', '1')
+          chip.setAttribute('role', 'button')
+          chip.setAttribute('tabindex', '0')
+          chip.setAttribute('aria-label', _alertStr('autoRetryRearmHint'))
+          chip.textContent = '↻'
+          chip.title = _alertStr('autoRetryRearmHint')
+          chip.addEventListener('click', function (ev) { ev.preventDefault(); ev.stopPropagation(); rearm() })
+          chip.addEventListener('keydown', function (ev) {
+            if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); ev.stopPropagation(); rearm() }
+          })
+          host.appendChild(chip)
+        }
+      } catch (_) {}
+    }
+
     /** Remove the injected indicator stylesheet and all root-level marks. */
     function _clearAutoRetryDomIndicator() {
+      _placeAutoRetryRearm(false)
       if (_autoRetryIndicatorStyle) {
         try { _autoRetryIndicatorStyle.remove() } catch (_) {}
         _autoRetryIndicatorStyle = null
@@ -1382,8 +1441,16 @@ var _PREFS_MAX_RETRIES = 8
 
       /** Warm-arm the guard for the current session with a fresh budget.
        *  Safe to call repeatedly: the budget is only re-seeded when the
-       *  record is missing or disarmed. */
-      function _armAutoRetry() {
+       *  record is missing or disarmed. When `force` is true (an explicit
+       *  USER action — flipping the quick switch ON or typing a bare continue
+       *  word), a budget-frozen record (armed yet `paused`, remaining 0) is
+       *  re-seeded with a fresh budget and un-frozen, so a human can always
+       *  re-open auto-continue after it parked for the burn limit. The
+       *  internal paths (`_handleTurnEnd` retryable re-arm and the persisted
+       *  choice restore) call WITHOUT force so they never resurrect a parked
+       *  session on their own — the budget-pause safety gate stays closed
+       *  until the user explicitly opts back in. */
+      function _armAutoRetry(force) {
         if (!_sessionId) return
         var rec = _activeAutoRetryRecord()
         var now = Date.now()
@@ -1393,6 +1460,26 @@ var _PREFS_MAX_RETRIES = 8
             makeDisarmedState(),
             _sessionId,
             typeof budget === 'number' && budget > 0 ? budget : 0,
+            now,
+          )
+        } else if (force && rec.paused) {
+          // User explicitly re-opened a budget-parked session: reset the budget
+          // and clear paused so it can run the consecutive limit again. Backoff
+          // level is dropped so the next continue starts from the grace delay.
+          var fresh = _alertPref('autoRetryMaxConsecutive')
+          _retryBySession[_sessionId] = armState(
+            Object.assign({}, rec, {
+              paused: false,
+              pending: false,
+              nextEmitAtMs: null,
+              backoffLevel: 0,
+              cooldownUntil: null,
+              remaining: typeof fresh === 'number' && fresh > 0 ? fresh : 0,
+              lastRequestId: null,
+              echoedAt: null,
+            }),
+            _sessionId,
+            typeof fresh === 'number' && fresh > 0 ? fresh : 0,
             now,
           )
         }
@@ -1696,7 +1783,9 @@ var _PREFS_MAX_RETRIES = 8
           // Typing a bare continue word opens auto-continue directly. The runner
           // (data layer) cannot render — arming just records + publishes; the
           // resident indicator reflects the now-armed state on the next poll.
-          _armAutoRetry()
+          // force=true so a budget-parked (paused) session is re-opened too: the
+          // user typing "继续" again IS the explicit opt-in to let it run again.
+          _armAutoRetry(true)
         } catch (e) {
           // Non-fatal: arming must never disrupt message processing.
         }
@@ -2288,8 +2377,11 @@ var _PREFS_MAX_RETRIES = 8
           // ── Auto-retry public API (§6) ─────────────────────────────────────
           // The persistent overlay drives the guard through these three
           // methods; state stays isolated per session id and the view is a
-          // live snapshot of the current session's record.
-          armAutoRetry: _armAutoRetry,
+          // live snapshot of the current session's record. armAutoRetry is
+          // only ever reached from explicit user actions (the quick switch, the
+          // resident Arm button), so it forces a re-arm: a budget-parked
+          // (paused) session the user chooses to open again is re-seeded.
+          armAutoRetry: function () { return _armAutoRetry(true) },
           disarmAutoRetry: function () { return _disarmAutoRetry('manual') },
           getAutoRetryView: _makeAutoRetryView,
           /** Current bound session id (the session an auto-continue offer belongs
@@ -3815,8 +3907,14 @@ var _PREFS_MAX_RETRIES = 8
         runnerAtt = t('autoRetryAccumLabel') + ' ' + _idx + '/' + _max
       }
       var runnerCd = runnerCountdown(runnerView)
-      var armDisabled = !runnerView || runnerState === 'scheduled' || runnerState === 'paused'
-        || (runnerView.remaining != null && Number(runnerView.remaining) <= 0) || runnerState === 'stopped'
+      // Arm is meaningful when the guard is OFF (stopped — normal turn-on) or
+      // parked for the burn limit (paused / armed with no budget left — clicking
+      // re-seeds via armAutoRetry(true), the user's explicit re-open). It is
+      // disabled only when there is nothing to arm: no view/source, a continue
+      // already queued (scheduled), or an actively-armed runner that still has
+      // budget left to spend.
+      var armDisabled = !runnerView || runnerState === 'scheduled'
+        || (runnerState === 'armed' && runnerView.remaining != null && Number(runnerView.remaining) > 0)
       var disarmDisabled = !runnerView || runnerState === 'stopped'
       var RUNNER_MUTED = { fontSize: '12px', color: '#868e96', marginRight: '8px' }
       var RUNNER_BTN = {

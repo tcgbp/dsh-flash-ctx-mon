@@ -101,6 +101,18 @@
     这一「无任何用户操作却自动站下」的情况弹告警（无操作事件本身需要被告知）；**手动「停止」**是用户
     自身显式动作、不言自明，不再弹退出告警（`disarmAutoRetry('manual')` 仍照常解除守卫，只是静默），
     对应的 `autoRetryExitedReasonManual` i18n（zh/en）删除。
+5c. **可重新开启被挂起的会话**（新增，响应「已中断/已暂停会话打不开自动继续」）：被预算耗尽
+    冻结到 `paused` 的记录仍是 `armed: true`，旧实现里 `_armAutoRetry` 只在 `!rec.armed` 时才重新播种预算，
+    于是开关/继续词对其都是**静默空操作**——一旦暂停便无路可回。现改为**显式用户动作**（快捷「自动继续」
+    开关拨开、resident 面板「立即武装」按钮、或裸继续词入口）调用 `_armAutoRetry(true)`：对 `armed && paused`
+    的记录清掉 `paused`/`pending`/`backoffLevel`/`cooldownUntil`、把 `remaining` 重新播种为新的
+    `autoRetryMaxConsecutive`，从而让护栏以「可再次烧到上限」的方式重新武装。内部路径（`_handleTurnEnd`
+    命中可重试结束的自动再武装、重绑时按持久化偏好恢复）**不带 force**，故被挂起的会话不会自行复活——
+    护栏的「暂停等人」语义得以保留，只是把重新开启的控制权交还用户。resident 面板 `armDisabled` 相应改为：
+    仅在无 view/source、`scheduled`（已排程）、或已 armed 且仍有预算时禁用；`stopped` 与 `paused` 均可点「立即武装」。
+   此外，常驻图标（`[data-dsh-flash-trigger]`，§8 指示条）在 `paused` 时右下角注入一枚小 **↻ 重新开启**
+   按钮（`[data-ctx-mon-rearm]`，`role=button`，仅暂停态由 `_placeAutoRetryRearm` 真实注入/移除，纯 CSS 无法承载点击），
+   点击等价于受控重新武装：预算播种回满、红环变回待命绿。
 6. 一次只排一个定时器，不叠加。
 7. **固定投递模式 `"queue"`**（新增，实证见 §8.4）：`session/prompt` 契约支持 `mode: "queue" | "steer"`
    （`SessionPromptRequest`，`types.d.ts` L332–340；客户端绑定面 `Session.prompt(content, mode, signal?, requestId?)`，

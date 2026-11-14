@@ -187,3 +187,32 @@
 
 **待办**
 - [ ] 三门口令通过（本轮已跑：`tsc --noEmit` exit 0、`vitest --pool=threads` 94/94、bundle grep 无残留）；GUI 浏览器验证：点「停止自动继续」不再弹 🔁 退出告警，连续补发达上限仍弹（budget + 定位后缀）。
+
+---
+
+## 后续任务：允许把被预算挂起(paused)的会话重新开启自动继续（用户最新要求）
+
+**背景**：用户问「**已中断状态会话为什么无法开启自动继续模式**」（观察「开关打不开」）。诊断结论——
+`interrupted` 本身属于「可重试结束」（`error/interrupted/max-tokens`），**不是**被它拦下；真正拦路的是
+**连续预算耗尽冻结到 `paused`**：该记录仍 `armed: true`、`remaining<=0`，而旧 `_armAutoRetry` 只在
+`!rec.armed` 时才重新播种预算 → 开关 / 继续词对 paused 均为静默空操作，且 resident `armDisabled` 对
+paused/stopped 一律禁用 → 一旦暂停无路可回。
+
+**经 `ask_user_question` 确认方案（推荐）**：**允许把已暂停(paused)的会话重新武装** ——
+**显式用户动作**（快捷「自动继续」开关拨开、resident「立即武装」按钮、或裸继续词入口）调用
+`_armAutoRetry(true)`：对 `armed && paused` 记录清除 `paused`/`pending`/`backoffLevel`/`cooldownUntil`
+并把 `remaining` 重新播种为新的 `autoRetryMaxConsecutive`；护栏保留 —— 内部路径（`_handleTurnEnd`
+可重试结束自动再武装、重绑按持久化偏好恢复）**不带 force**，故被挂起会话不会自行复活。
+
+**已完成**
+- [x] `src-client/factory-body.js`：`_armAutoRetry(force)` 新增 paused 再武装分支；公共 `armAutoRetry`
+      与 `_autoArmOnContinue` 带 `force=true`；`armDisabled` 改为 stopped/paused 可点「立即武装」、
+      仅 无view/source、scheduled、已armed且有预算 时禁用。
+- [x] `node scripts/build-client.mjs`（183.7kb）exit 0：bundle 含 `force && rec.paused` 再武装分支、
+      新 `armDisabled`、`_armAutoRetry(true)`。
+- [x] 同步 CHANGELOG / README×2 / docs design（§5 新增 5c）/ progress / 本文件；不改用户 ` M` 文件。
+
+**待办**
+- [ ] 三门口令通过（本轮已跑：`tsc --noEmit` exit 0、`vitest --pool=threads` 94/94、build exit 0）；
+      GUI 浏览器验证：预算烧尽挂起的会话拨「自动继续」开关（或点「立即武装」）→ 红色 paused 回到绿色
+      待命并继续自动补发；未武装/已武装正常会话行为不变。

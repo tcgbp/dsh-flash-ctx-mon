@@ -68,6 +68,35 @@ Internal:
   branch (only budget survives the gate), and the `autoRetryExitedReasonManual`
   i18n keys are deleted from zh and en.
 
+**A budget-parked (paused) session can be re-opened again.** A session that froze
+at `paused` because it burned through the consecutive budget
+(`autoRetryMaxConsecutive`, default 4) previously had **no** path back to 'armed' —
+flipping the switch or typing a bare continue word were both silent no-ops, because
+`_armAutoRetry` only re-seeded when the record was missing or disarmed while a
+paused record stays `armed: true`. Now an **explicit user action** (the quick-panel
+switch ON or a bare continue word) re-seeds the budget and clears `paused`, so the
+user can choose to let the guard run up to the limit again. The safety gate is
+unchanged in spirit: internal re-arms (`_handleTurnEnd` on a retryable end, and the
+persisted-choice restore on re-bind) call **without** force, so a parked session is
+never resurrected on its own — only a human choosing to open it again does.
+
+Internal:
+- `_armAutoRetry(force)` re-seeds a `paused`/`remaining<=0` armed record when
+  `force` is true (reset `paused`, `pending`, `backoffLevel`, `cooldownUntil`, and
+  re-prime `remaining` to a fresh budget).
+- The public `armAutoRetry` and the `_autoArmOnContinue` continue-word entry now
+  pass `force=true`; `_handleTurnEnd` and the re-bind restore keep the default.
+- The resident Arm button (`armDisabled`) is now enabled for `stopped` and
+  `paused` (only disabled for no view/source, `scheduled`, or an actively-armed
+  runner with budget left), so a parked session has a one-click re-open control.
+- The resident flash icon itself now carries a small **↻ re-arm chip on its
+  bottom-right corner while `paused`**: clicking it (or Enter/Space on it) is an
+  explicit re-arm that re-seeds the budget and flips the red ring back to green
+  (`armed`). The chip is a real `role=button` element (`[data-ctx-mon-rearm]`)
+  injected/removed by `_placeAutoRetryRearm` on each indicator publish — pure CSS
+  cannot host a click, so JS creates the control only in the `paused` state and
+  removes it on any other state and on dispose.
+
 ## 0.2.2
 
 **Release engineering only — no runtime behaviour change.** The publish workflow is
