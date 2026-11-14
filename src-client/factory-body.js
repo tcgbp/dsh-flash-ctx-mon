@@ -179,6 +179,14 @@ window.__ModuleLoader__.load({
       continuePromptDecline: '暂不开启',
       continuePromptArmed: '已开启自动重试',
       continuePromptClose: '关闭',
+      // Auto-continue exited (info alert with the reason)
+      alertAutoRetryExited: '已退出自动继续',
+      autoRetryExitedReasonHuman: '检测到人工输入，已停止自动继续',
+      autoRetryExitedReasonManual: '已按你的操作停止自动继续',
+      autoRetryExitedReasonSettled: '回合正常结束，已停止自动继续',
+      autoRetryExitedReasonBudget: '已连续自动继续达到上限，暂停等待人工输入',
+      // Quick-control switch label (one-click manual off / re-arm)
+      autoRetryQuickLabel: '自动继续',
       // Alert preview
       alertPreviewToggle: '查看告警消息样例',
     }
@@ -275,6 +283,14 @@ window.__ModuleLoader__.load({
       continuePromptDecline: 'Not now',
       continuePromptArmed: 'Auto-retry is on',
       continuePromptClose: 'Close',
+      // Auto-continue exited (info alert with the reason)
+      alertAutoRetryExited: 'Auto-continue turned off',
+      autoRetryExitedReasonHuman: 'Detected human input — auto-continue stopped',
+      autoRetryExitedReasonManual: 'Stopped by your action — auto-continue off',
+      autoRetryExitedReasonSettled: 'Turn settled normally — auto-continue stopped',
+      autoRetryExitedReasonBudget: 'Reached the auto-continue limit — paused for your input',
+      // Quick-control switch label (one-click manual off / re-arm)
+      autoRetryQuickLabel: 'Auto-continue',
       // Alert preview
       alertPreviewToggle: 'View alert message samples',
     }
@@ -314,6 +330,16 @@ window.__ModuleLoader__.load({
     function t(key) {
       var locale = LOCALES[_currentLocaleKey] || LOCALES.en
       return locale[key] !== undefined ? locale[key] : (LOCALES.en[key] !== undefined ? LOCALES.en[key] : key)
+    }
+
+    /** Map an auto-continue exit reason to its i18n key. The default (and any
+     *  unknown reason) resolves to the generic "turn settled" copy so the info
+     *  toast always carries readable, reason-specific detail. */
+    function autoRetryExitedReasonKey(reason) {
+      return reason === 'human' ? 'autoRetryExitedReasonHuman'
+        : reason === 'manual' ? 'autoRetryExitedReasonManual'
+        : reason === 'budget' ? 'autoRetryExitedReasonBudget'
+        : 'autoRetryExitedReasonSettled'
     }
 
     /** Functional label helper — returns a function that calls t() so the label updates on locale change. */
@@ -906,6 +932,26 @@ var _PREFS_MAX_RETRIES = 8
      *  The MonitorConfigModal reads token estimates from this. */
     var _activeTokenSource = null
 
+    /** Quick-control switch id for the manual auto-continue on/off entry. Kept
+     *  distinct from TOGGLE_KEY (the context-monitor master toggle) so panel
+     *  users get a dedicated one-click close for auto-continue. */
+    var RUNNER_QUICK_KEY = 'dsh-flash-ctx-mon:auto-continue'
+
+    /** Whether the CURRENT bound session has auto-continue ACTIVE. armed,
+     *  scheduled and paused all count as on; stopped (and no view / no source)
+     *  count as off. Shared by the quick-control switch's visible()/getValue()
+     *  (registered in _registerServices) and the in-modal runner state so every
+     *  surface agrees on one source of truth. */
+    function _getRunnerActive() {
+      var src = _activeTokenSource
+      if (!src || typeof src.getAutoRetryView !== 'function') return false
+      var view = null
+      try { view = src.getAutoRetryView() || null } catch (_) { return false }
+      if (!view) return false
+      var st = view.state
+      return st === 'armed' || st === 'scheduled' || st === 'paused'
+    }
+
     /** Optional live bridge for the resident overlay (§6). Integration code may
      *  attach a `{ notify(view) }` object here to subscribe to auto-retry view
      *  publishes; while null the publishes are a no-op and the overlay reads
@@ -1134,6 +1180,25 @@ var _PREFS_MAX_RETRIES = 8
     /** How long to wait before offering again for the same session (ms). */
     var CONTINUE_PROMPT_COOLDOWN_MS = 60000
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // "Session exited auto-continue" info alert (data-layer → provider channel).
+    //
+    // The complement of the continue-offer above: when the CURRENT session leaves
+    // an active auto-continue state (armed/scheduled/paused → stopped) for a
+    // user-relevant reason (human input / manual stop / settled turn / budget
+    // exhausted), the runner records the exit and the alert provider surfaces it
+    // ONCE as an info alert naming the reason. Also module scope so the
+    // "don't nag again" cooldown survives a source stop/start cycle on re-bind.
+    var _autoRetryExitedPending = null
+    /** last-alerted timestamp per sessionId, to stop re-nagging. */
+    var _autoRetryExitedAt = Object.create(null)
+    /** How long to wait before alerting again for the same session (ms). */
+    var AUTO_RETRY_EXIT_COOLDOWN_MS = 60000
+    /** Exit reasons that warrant a user-facing info alert. Anything else
+     *  (internal stand-downs — no session, prompt failure) carries no actionable
+     *  info and stays silent. */
+    var AUTO_RETRY_EXIT_REASONS = ['human', 'manual', 'settled', 'budget']
+
     /**
      * SessionEventTokenSource — reads precise token usage from DSH's session
      * event stream via the `sessions` service.
@@ -1270,12 +1335,32 @@ var _PREFS_MAX_RETRIES = 8
         return _retryBySession[_sessionId] || null
       }
 
+      /** Record that the bound session just left active auto-continue, so the
+       *  alert provider can surface ONE info toast naming the reason. Only
+       *  user-relevant reasons alert; per-session cooldown (mirrors the
+       *  continue-offer) stops rapid re-entry/exits from spamming. */
+      function _noteAutoRetryExit(reason) {
+        if (AUTO_RETRY_EXIT_REASONS.indexOf(reason) < 0) return
+        var sid = _sessionId
+        if (!sid) return
+        var now = Date.now()
+        var last = _autoRetryExitedAt[sid]
+        if (typeof last === 'number' && now - last < AUTO_RETRY_EXIT_COOLDOWN_MS) return
+        _autoRetryExitedAt[sid] = now
+        _autoRetryExitedPending = { sessionId: sid, reason: reason, at: now }
+      }
+
       /** Drop the guard entirely: stop any pending emission and forget the
        *  session's consecutive budget. Used on genuine human input (§5.5),
-       *  on non-retryable turn/end, and on a manual disarm. */
-      function _disarmAutoRetry() {
+       *  on non-retryable turn/end, and on a manual disarm. When the record
+       *  being dropped was actually ACTIVE (armed/scheduled/paused) and the
+       *  caller provides a user-relevant `reason` (human/manual/settled), one
+       *  info alert is surfaced explaining why auto-continue was turned off. */
+      function _disarmAutoRetry(reason) {
         _retryTimersClear()
         if (_sessionId && _retryBySession[_sessionId]) {
+          var rec = _retryBySession[_sessionId]
+          var wasActive = !!(rec && rec.armed)
           delete _retryBySession[_sessionId]
           // The guard was dropped for a real reason (manual disarm, genuine
           // human input, or a non-retryable end). Drop the persisted choice
@@ -1283,6 +1368,7 @@ var _PREFS_MAX_RETRIES = 8
           // a dropped key and a stored `false` are equivalent (both "don't
           // auto-arm"), but dropping keeps archived sessions from accumulating.
           _writeAutoRetryPref(_sessionId, false)
+          if (wasActive) _noteAutoRetryExit(reason)
         }
         _publishAutoRetryView()
       }
@@ -1374,14 +1460,14 @@ var _PREFS_MAX_RETRIES = 8
         if (!session) {
           // Cannot reach a session: silently stand down rather than spin.
           console.warn('[dsh-flash-ctx-mon] auto-continue: no prompt-capable session for ' + _sessionId + ' — disarming')
-          _disarmAutoRetry()
+          _disarmAutoRetry('internal')
           return
         }
         var now = Date.now()
         // The sent text is read live from prefs so what is echoed back and
         // what the self-echo detector expects always agree (§5.4).
         var continueText = _alertStr('autoRetryContinueText')
-        if (!continueText) { _disarmAutoRetry(); return }
+        if (!continueText) { _disarmAutoRetry('internal'); return }
         var attemptSeq = rec.maxConsecutive - rec.remaining + 1
         var requestId = requestIdForAttempt(
           _retryRequestIdCache,
@@ -1414,7 +1500,7 @@ var _PREFS_MAX_RETRIES = 8
         next.nextEmitAtMs = null
         _retryBySession[_sessionId] = next
         _publishAutoRetryView()
-        if (!emitted) _disarmAutoRetry()
+        if (!emitted) _disarmAutoRetry('internal')
       }
 
       /** Schedule the guarded emission for the armed session. Backoff is
@@ -1453,15 +1539,18 @@ var _PREFS_MAX_RETRIES = 8
       function _handleTurnEnd(reason) {
         try {
           var turnRetryable = isRetryableEnd(reason) || isHandoffStub(_lastAssistantText)
-          if (!turnRetryable) { _disarmAutoRetry(); return }
+          if (!turnRetryable) { _disarmAutoRetry('settled'); return }
           _armAutoRetry()
           var rec = _activeAutoRetryRecord()
           if (!rec) return
           if (rec.remaining <= 0) {
             // Budget exhausted: freeze at "paused" until a human takes over.
+            // From the user's viewpoint auto-continue has stood down, so alert
+            // once (cooldown-gated) with the budget reason.
             if (!rec.paused) {
               _retryBySession[_sessionId] = Object.assign({}, rec, { paused: true, pending: false, nextEmitAtMs: null })
               _retryTimersClear()
+              _noteAutoRetryExit('budget')
             }
             _publishAutoRetryView()
             return
@@ -1496,7 +1585,7 @@ var _PREFS_MAX_RETRIES = 8
           }
           // Not our echo → real human words → hand the wheel back.
           console.log('[dsh-flash-ctx-mon] user message while armed does not match self-echo — disarming auto-retry')
-          _disarmAutoRetry()
+          _disarmAutoRetry('human')
         } catch (e) {
           // Non-fatal: malformed entries must not break the event loop.
         }
@@ -2196,7 +2285,7 @@ var _PREFS_MAX_RETRIES = 8
           // methods; state stays isolated per session id and the view is a
           // live snapshot of the current session's record.
           armAutoRetry: _armAutoRetry,
-          disarmAutoRetry: _disarmAutoRetry,
+          disarmAutoRetry: function () { return _disarmAutoRetry('manual') },
           getAutoRetryView: _makeAutoRetryView,
           /** Current bound session id (the session an auto-continue offer belongs
            *  to). Null when no session is materialized. Used by the alert provider
@@ -2819,6 +2908,27 @@ var _PREFS_MAX_RETRIES = 8
                 },
               },
             ],
+          })
+        }
+
+        // "Session exited auto-continue" info alert — the complement of the
+        // offer above. When the data layer records that the CURRENT session left
+        // active auto-continue for a user-relevant reason, surface ONE info toast
+        // naming that reason. The pending is CLAIMED on first read (nulled), so
+        // the alert is emitted exactly once and, after it leaves the registry
+        // (eviction/refresh), will never be re-toasted.
+        var exitedPending = _autoRetryExitedPending
+        if (exitedPending && exitedPending.sessionId === (tokenSource && tokenSource.getSessionId ? tokenSource.getSessionId() : null)) {
+          _autoRetryExitedPending = null
+          var exitedAt = typeof exitedPending.at === 'number' ? exitedPending.at : Date.now()
+          alerts.push({
+            id: 'ctx-auto-continue-exited-' + exitedAt,
+            severity: 'info',
+            title: function () { return t('alertAutoRetryExited') },
+            message: function () { return t(autoRetryExitedReasonKey(exitedPending.reason)) },
+            icon: '🔁',
+            timestamp: exitedAt,
+            dismissible: true,
           })
         }
 
@@ -4836,6 +4946,46 @@ var _PREFS_MAX_RETRIES = 8
             })
             return dispose
           }, 'dsh-flash-ctx-mon: monitor-context switch')
+
+          // 4b. Register the manual auto-continue quick switch. This is the
+          //     one-click "turn off / re-arm auto-continue" entry the user asked
+          //     for. It mirrors the monitor switch's registerSwitch contract.
+          //     Semantics are a ONE-TIME disarm (no persistent off pref): the
+          //     runner's disarmAutoRetry drops the session's armed record, and
+          //     re-arming simply calls armAutoRetry again.
+          ctx.effect(function () {
+            var dispose = registry.registerSwitch({
+              id: RUNNER_QUICK_KEY,
+              label: L('autoRetryQuickLabel'),
+              icon: 'refresh',
+              type: 'toggle',
+              group: 'system',
+              cluster: 'system-alerts',
+              order: 60,
+              // Visible only while the CURRENT session actually has
+              // auto-continue active — it is a "manual off"/"re-arm" control,
+              // not a permanent row.
+              visible: function () { return _getRunnerActive() },
+              config: function () { openMonitorConfig('context') },
+              getValue: function () { return _getRunnerActive() },
+              setValue: function (v) {
+                var src = _activeTokenSource
+                if (!src) return
+                try {
+                  if (v) {
+                    if (typeof src.armAutoRetry === 'function') src.armAutoRetry()
+                  } else if (typeof src.disarmAutoRetry === 'function') {
+                    // Manual off → 'manual' reason → surfaces the info alert
+                    // "已按你的操作停止自动继续 / Stopped by your action".
+                    src.disarmAutoRetry()
+                  }
+                } catch (_) {}
+                registry.notifyChange(RUNNER_QUICK_KEY)
+                try { alertRegistry.notify() } catch (_) {}
+              },
+            })
+            return dispose
+          }, 'dsh-flash-ctx-mon: auto-continue quick switch')
 
           // 5. Apply persisted toggle gates — before the alert registry auto-starts
           Object.keys(_MONITOR_TOGGLES).forEach(function (m) {
