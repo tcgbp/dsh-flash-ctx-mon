@@ -97,10 +97,17 @@
 5b. **退出告警带定位信息**（新增，随后修订为仅预算暂停触发）：`_noteAutoRetryExit` 记录会话退出时解析该会话 `cwd` 作为「工作区」，
     随 `_autoRetryExitedPending` 一并带上；provider 在 info 告警 message 末尾追加
     `（会话 <sid>，工作区 <cwd>）` 定位后缀，方便用户切回后快速定位是哪个工作区/会话退出了自动继续。
-    **2026-11 修订**：`AUTO_RETRY_EXIT_REASONS` 收敛为 `['budget']` —— 仅**连续补发达上限（→paused）**
-    这一「无任何用户操作却自动站下」的情况弹告警（无操作事件本身需要被告知）；**手动「停止」**是用户
-    自身显式动作、不言自明，不再弹退出告警（`disarmAutoRetry('manual')` 仍照常解除守卫，只是静默），
-    对应的 `autoRetryExitedReasonManual` i18n（zh/en）删除。
+    **2026-11 修订（续）**：`AUTO_RETRY_EXIT_REASONS` = `['budget', 'prompt-failed']` ——
+    **连续补发达上限（→paused）**与**宿主拒绝自动补发 prompt**（`res.ok === false` / RPC 抛错，
+    如 `session/not-found` / `session/agent-busy` / `session/writer-held` / `gateway/*`）都弹一条
+    🔁 info 告警——二者都是「用户无任何操作却自动离开自动继续」，需要点名。其中「prompt 被拒」是
+    **异步**落地：`_autoContinueEntry` 先乐观记 `emitted` 并回绿（成功节奏不变），宿主随后拒绝时由
+    其 `.then`/`.catch` 触发 `_failAutoContinuePrompt(requestId, detail)`——以 `lastRequestId` 匹配
+    做护栏（不误杀更新一次仍在排程的尝试），再 `_disarmAutoRetry('prompt-failed')` 站下（→ stopped，
+    与 §4「prompt 失败→已解除」一致），并把宿主拒绝详情附到告警末尾。**手动「停止」**仍是用户自身
+    显式动作、不言自明，不再弹退出告警（`disarmAutoRetry('manual')` 照常解除守卫，只是静默），
+    对应的 `autoRetryExitedReasonManual` i18n（zh/en）删除；`autoRetryExitedReasonKey` 恢复
+    `prompt-failed` 分支。
 5c. **可重新开启被挂起的会话**（新增，响应「已中断/已暂停会话打不开自动继续」）：被预算耗尽
     冻结到 `paused` 的记录仍是 `armed: true`，旧实现里 `_armAutoRetry` 只在 `!rec.armed` 时才重新播种预算，
     于是开关/继续词对其都是**静默空操作**——一旦暂停便无路可回。现改为**显式用户动作**（快捷「自动继续」

@@ -1,0 +1,42 @@
+{
+  "ts": "2026-11-15T06:20:49.277Z",
+  "pid": 9896,
+  "patchPath": "C:\\Users\\ThinkPad\\.dsh\\profiles\\web\\cordis.patch.yml",
+  "profileDir": "C:\\Users\\ThinkPad\\.dsh\\profiles\\web",
+  "home": "C:\\Users\\ThinkPad\\.dsh",
+  "startedBundles": [
+    "@deepseek-ai/dsh-base",
+    "@deepseek-ai/dsh-web-app",
+    "dshmarket",
+    "dsh-gitbash-shell",
+    "dsh-git-review",
+    "dsh-plugin-guide",
+    "@weibaohui/dsh-continue",
+    "dsh-flash",
+    "dsh-flash-mem-mon",
+    "dsh-lang-zh",
+    "dsh-flash-ctx-mon",
+    "dsh-flash-skin",
+    "dsh-flash-net-mon",
+    "dsh-flash-proxy",
+    "@deepseek-ai/dsh-experimental-agent-team-profile",
+    "@deepseek-ai/dsh-experimental-auto-review",
+    "@deepseek-ai/dsh-experimental-plugin-market-bundle"
+  ],
+  "overlays": [],
+  "hasEditor": true,
+  "entryId": "dsh-flash-ctx-mon",
+  "entryInfo": {
+    "inheritedKeys": [],
+    "override": {
+      "modelContextWindows": {
+        "DeepSeek-V4-Flash": 131072,
+        "deepseek-flash": 1048576
+      },
+      "modelContextWindowSources": {
+        "DeepSeek-V4-Flash": "request-context",
+        "deepseek-flash": "request-context"
+      }
+    }
+  }
+}

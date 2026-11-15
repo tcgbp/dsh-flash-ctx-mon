@@ -213,7 +213,12 @@ It is **fully turned off** when:
 
 1. **Manual stop** — you press "Stop auto-continue".
 2. **The auto-send cannot run** — no prompt-capable session is reachable, the continue text
-   is empty, or the `prompt` injection throws (it silently stands down rather than spin).
+   is empty, or the `prompt` injection throws.
+3. **The host rejects the queued prompt** — the attempted auto-continue comes back
+   `ok: false` or throws asynchronously after the slot was optimistically spent (e.g. the host
+   says the session/agent is not resumable: `session/not-found`, `session/agent-busy`,
+   `session/writer-held`, `gateway/*`), it stands the guard **fully down** and alerts you — the
+   "turned green but no 继续 ever arrived" case no longer stays silent.
 
 It **pauses (but stays conceptually armed)** when:
 
@@ -231,12 +236,13 @@ Note: while armed but inside the **cooldown window** (`autoRetryCooldownMs`) or 
 scheduled** (counting down grace/backoff), the guard simply stays armed and idle — that is
 not a turn-off.
 
-Only **consecutive-budget exhaustion** (→ `paused`) — a stand-down that happens with no
-user action — shows a 🔁 `info` alert naming the reason and appending **location info**:
-`(session <session-id>, workspace <cwd>)`, so when you come back from another session you can
-instantly tell which workspace/session got parked that way. Pressing **"Stop auto-continue"**
-is your own explicit action and is self-evident, so that manual stop does **not** toast — the
-disarm itself still works exactly as before.
+Two stand-downs happen with **no user action**, so each surfaces a single 🔁 `info` alert naming
+the reason and appending **location info** `(session <session-id>, workspace <cwd>)` — plus the
+host's rejection detail for a failed prompt: **consecutive-budget exhaustion** (→ `paused`, parked
+waiting for you) and a **host-rejected auto-continue prompt** (→ fully off, so you stop the silent
+"turned green but no 继续" situation). Pressing **"Stop auto-continue"** is your own explicit
+action and is self-evident, so that manual stop does **not** toast — the disarm itself still works
+exactly as before.
 
 ## Settings
 

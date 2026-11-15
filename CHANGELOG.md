@@ -13,6 +13,29 @@ hold the settings namespace and schema.
 
 ## Unreleased
 
+**A host-rejected auto-continue now stands the guard down with a visible toast.**
+When the queued resume prompt for an armed session comes back rejected from the
+host (`res.ok === false`, or the RPC throws — e.g. `session/not-found`,
+`session/agent-busy`, `session/writer-held`, `gateway/*`), the guard previously
+fell back to `armed` (green) and spent a budget slot in silence — the exact
+`scheduled → green with no "继续"` symptom. Now a **failed emission** disarms the
+guard (→ `stopped`) and surfaces **one** 🔁 info alert naming the cause (with the
+host's rejection detail appended when available). A landing rejection can no
+longer silently interleave with and cancel a newer, still-pending attempt: the
+stand-down only applies while the record's `lastRequestId` still matches the
+attempt that failed.
+
+Internal:
+- The primary host dispatch in `_autoContinueEntry` keeps its optimistic
+  synchronous budget-spend (the success rhythm is unchanged); on an async
+  rejection its `.then`/`.catch` now call `_failAutoContinuePrompt(requestId, detail)`.
+- `_failAutoContinuePrompt` guards by `lastRequestId` (a late failure of a
+  superseded attempt is ignored), then disarms via `_disarmAutoRetry('prompt-failed')`
+  and attaches the rejection detail onto the pending exit-alert.
+- `AUTO_RETRY_EXIT_REASONS` is now `['budget', 'prompt-failed']`;
+  `autoRetryExitedReasonKey` regains its `prompt-failed` branch, and the
+  `autoRetryExitedReasonPromptFailed` i18n keys are added to both zh and en.
+
 **Typing a bare continue word now arms auto-continue directly — no confirmation
 dialog at all.** In an unarmed session, when you manually send a message that is
 exactly a continue word (`继续` / `continue` / `cont` / `resume` / `res`, case- and
@@ -62,11 +85,13 @@ the *only* surviving exit-alert reason, since it happens without any user action
 and genuinely benefits from a toast naming the cause.
 
 Internal:
-- `AUTO_RETRY_EXIT_REASONS` is now `['budget']` (the `'manual'` reason is gated
-  out in `_noteAutoRetryExit`, so `disarmAutoRetry('manual')` disarms silently).
-- `autoRetryExitedReasonKey` collapses to a single `autoRetryExitedReasonBudget`
-  branch (only budget survives the gate), and the `autoRetryExitedReasonManual`
-  i18n keys are deleted from zh and en.
+- `AUTO_RETRY_EXIT_REASONS` is `['budget', 'prompt-failed']` — the `'manual'`
+  reason is gated out in `_noteAutoRetryExit`, so `disarmAutoRetry('manual')`
+  disarms silently (the `'prompt-failed'` reason was added later, see the top
+  Unreleased entry).
+- `autoRetryExitedReasonKey` keeps a `prompt-failed` branch (only `budget`
+  survived the earlier gate), and the `autoRetryExitedReasonManual` i18n keys are
+  deleted from zh and en.
 
 **A budget-parked (paused) session can be re-opened again.** A session that froze
 at `paused` because it burned through the consecutive budget

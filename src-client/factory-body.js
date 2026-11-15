@@ -176,6 +176,7 @@ window.__ModuleLoader__.load({
       // Auto-continue exited (info alert with the reason)
       alertAutoRetryExited: '已退出自动继续',
       autoRetryExitedReasonBudget: '已连续自动继续达到上限，暂停等待人工输入',
+      autoRetryExitedReasonPromptFailed: '自动补发「继续」失败，已停止自动继续',
       // Location suffix appended to the exited-alert so the user can locate the
       // workspace + session that just left auto-continue.
       autoRetryExitedLocSid: '会话 {value}',
@@ -278,6 +279,7 @@ window.__ModuleLoader__.load({
       // Auto-continue exited (info alert with the reason)
       alertAutoRetryExited: 'Auto-continue turned off',
       autoRetryExitedReasonBudget: 'Reached the auto-continue limit — paused for your input',
+      autoRetryExitedReasonPromptFailed: 'Auto-continue was rejected — stopped sending "继续"',
       // Location suffix appended to the exited-alert so the user can locate the
       // workspace + session that just left auto-continue.
       autoRetryExitedLocSid: 'session {value}',
@@ -330,11 +332,11 @@ window.__ModuleLoader__.load({
 
     /** Map an auto-continue exit reason to its i18n key. Normal turn completion
      *  is no longer an exit (see _handleTurnEnd), and a manual stop no longer
-     *  alerts (see AUTO_RETRY_EXIT_REASONS) — the only reason that survives the
-     *  gating in _noteAutoRetryExit is consecutive-budget exhaustion, so this
-     *  always resolves to the budget copy. */
+     *  alerts (see AUTO_RETRY_EXIT_REASONS). Only the reasons that survive the
+     *  gating in _noteAutoRetryExit are surfaced — consecutive-budget exhaustion
+     *  and a host-rejected auto-continue prompt. */
     function autoRetryExitedReasonKey(reason) {
-      return 'autoRetryExitedReasonBudget'
+      return reason === 'prompt-failed' ? 'autoRetryExitedReasonPromptFailed' : 'autoRetryExitedReasonBudget'
     }
 
     /** Build the location suffix for the "exited auto-continue" alert so the
@@ -1238,13 +1240,14 @@ var _PREFS_MAX_RETRIES = 8
     /** How long to wait before alerting again for the same session (ms). */
     var AUTO_RETRY_EXIT_COOLDOWN_MS = 60000
     /** Exit reasons that warrant a user-facing info alert. Anything else
-     *  (internal stand-downs — no session, prompt failure; a manual "stop"
-     *  which is an obvious user-initiated action) carries no informative value
-     *  and stays silent. A normal turn completion no longer ends the guard, so
-     *  it is not an alert reason either. Consecutive-budget exhaustion is the
-     *  only remaining reason: auto-continue pauses without any user action, so
-     *  a toast naming the cause is genuinely useful. */
-    var AUTO_RETRY_EXIT_REASONS = ['budget']
+     *  (internal stand-downs — no session; a manual "stop" which is an obvious
+     *  user-initiated action) carries no informative value and stays silent. A
+     *  normal turn completion no longer ends the guard, so it is not an alert
+     *  reason either. Two reasons remain: consecutive-budget exhaustion, and a
+     *  host-rejected auto-continue prompt — both leave auto-continue without
+     *  any (budget) or any visible (rejection) user action, so a toast naming
+     *  the cause is genuinely useful. */
+    var AUTO_RETRY_EXIT_REASONS = ['budget', 'prompt-failed']
 
     /**
      * SessionEventTokenSource — reads precise token usage from DSH's session
@@ -1287,6 +1290,11 @@ var _PREFS_MAX_RETRIES = 8
       var _contextWindowModel = null
       var _sessions = null
       var _sessionId = null
+      // Session id fed from the rendered panel (slot `props.sessionId`). The
+      // host does not expose a counting-host `sessions.list`/`scopeOf` store to
+      // enumerate the active session from, so the runner binds to the session
+      // the UI is actually rendering for instead of guessing one.
+      var _boundSessionId = null
       var _ctx = null       // Cordis context for preference writes (set in start)
       var _bindRetryTimer = null
       var _bindRetryCount = 0
@@ -1382,23 +1390,50 @@ var _PREFS_MAX_RETRIES = 8
         return _retryBySession[_sessionId] || null
       }
 
-      /** Resolve the workspace (cwd) for a session id from the session list
-       *  store's `byId` row, or null when the session is not listed / reports no
-       *  cwd. Used to let the "exited auto-continue" alert name the workspace
-       *  the user is working in, so it is easy to locate on switch-back. */
+      /** Best-effort workspace (cwd) cache, keyed by session id, populated
+       *  asynchronously from the host `remote.session` namespace (which this
+       *  host exposes instead of a counting-host `sessions.list.byId`). */
+      var _workspaceBySession = Object.create(null)
+
+      function _refreshWorkspaces() {
+        if (!_ctx) return
+        var remote = null
+        try { remote = resolveRemoteNamespace(_ctx, 'session') } catch (_) {}
+        if (!remote || typeof remote.list !== 'function') return
+        var signal = (typeof AbortController !== 'undefined') ? new AbortController().signal : undefined
+        Promise.resolve(remote.list({}, signal)).then(function (result) {
+          var items = result && result.value ? result.value : result
+          var rows = null
+          if (items && Array.isArray(items.items)) rows = items.items
+          else if (Array.isArray(items)) rows = items
+          if (!rows) return
+          for (var i = 0; i < rows.length; i++) {
+            var row = rows[i]
+            if (!row) continue
+            var id = row.id
+            var cwd = null
+            if (row.header && typeof row.header.cwd === 'string') cwd = row.header.cwd
+            else if (typeof row.cwd === 'string') cwd = row.cwd
+            if (id && cwd) _workspaceBySession[id] = cwd
+          }
+        }).catch(function () {})
+      }
+
+      /** Resolve the workspace (cwd) for a session id from the host-backed
+       *  cache, or null when unknown yet. Used to let the "exited auto-continue"
+       *  alert name the workspace the user is working in, so it is easy to
+       *  locate on switch-back. */
       function _sessionWorkspace(sessionId) {
-        if (!_sessions || !sessionId) return null
-        try {
-          var snap = _sessions.list && _sessions.list.getSnapshot ? _sessions.list.getSnapshot() : null
-          var row = snap && snap.byId && snap.byId[sessionId]
-          return (row && typeof row.cwd === 'string' && row.cwd) ? row.cwd : null
-        } catch (_) { return null }
+        if (!sessionId) return null
+        var cwd = _workspaceBySession[sessionId]
+        return (typeof cwd === 'string' && cwd) ? cwd : null
       }
 
       /** Record that the bound session just left active auto-continue, so the
        *  alert provider can surface ONE info toast naming the reason. Only the
-       *  reasons in AUTO_RETRY_EXIT_REASONS alert (currently just budget
-       *  exhaustion — a manual stop is self-evident); per-session cooldown
+       *  reasons in AUTO_RETRY_EXIT_REASONS alert (budget exhaustion — paused
+       *  with no user action; prompt-failed — a rejected auto-continue that the
+       *  user never saw; a manual stop is self-evident); per-session cooldown
        *  (mirrors the continue-offer) stops rapid re-entry/exits from spamming. */
       function _noteAutoRetryExit(reason) {
         if (AUTO_RETRY_EXIT_REASONS.indexOf(reason) < 0) return
@@ -1418,10 +1453,11 @@ var _PREFS_MAX_RETRIES = 8
 
       /** Drop the guard entirely: stop any pending emission and forget the
        *  session's consecutive budget. Used on genuine human input (§5.5),
-       *  on non-retryable turn/end, and on a manual disarm. Only a
-       *  consecutive-budget exhaustion surfaces an info alert (via
-       *  _noteAutoRetryExit('budget') in _handleTurnEnd); a manual disarm,
-       *  being an explicit user action, is not re-announced. */
+       *  on non-retryable turn/end, on a manual disarm, and on a
+       *  host-rejected auto-continue prompt. Budget exhaustion and a rejected
+       *  prompt surface a visible info alert (via _noteAutoRetryExit in
+       *  _handleTurnEnd / _failAutoContinuePrompt); a manual disarm, being an
+       *  explicit user action, is not re-announced. */
       function _disarmAutoRetry(reason) {
         _retryTimersClear()
         if (_sessionId && _retryBySession[_sessionId]) {
@@ -1451,7 +1487,28 @@ var _PREFS_MAX_RETRIES = 8
        *  session on their own — the budget-pause safety gate stays closed
        *  until the user explicitly opts back in. */
       function _armAutoRetry(force) {
-        if (!_sessionId) return
+        if (!_sessionId) {
+          // A manual arm must never SILENTLY no-op just because the runner
+          // lost its session binding — the most common cause of the quick
+          // switch appearing to "not turn on":
+          //   - the SkillChip mounted before the provider had created the
+          //     token source (its setSessionId effect then skipped the bind
+          //     and, with deps `[sessionId]`, never re-ran), or
+          //   - the provider was stopped/restarted, which nulls _sessionId.
+          // Re-derive the open session synchronously and bind before arming
+          // (same discovery _tryBindSession uses), so flipping the switch
+          // works the moment a session is materialized.
+          var recovered = _findMaterializedSession()
+          if (recovered) {
+            _boundSessionId = recovered
+            _sessionId = recovered
+            _bindToSession()
+          } else {
+            console.warn('[dsh-flash-ctx-mon] auto-continue arm skipped: no bound/open session in the UI')
+            _publishAutoRetryView()
+            return
+          }
+        }
         var rec = _activeAutoRetryRecord()
         var now = Date.now()
         if (!rec || !rec.armed) {
@@ -1558,20 +1615,63 @@ var _PREFS_MAX_RETRIES = 8
             return 'auto-retry-' + _sessionId + '-' + attemptSeq + '-' + String(now)
           },
         )
-        var source = { kind: 'user', rpcId: requestId, autocontinue: true }
         var emitted = false
-        try {
-          // The injected prompt returns into the conversation log as a
-          // user/message entry whose source carries the same rpcId — that is
-          // how the self-echo detector proves it is ours (§8.4).
-          if (session.prompt.length >= 2) {
-            session.prompt([{ type: 'text', text: continueText }], { source: source })
-          } else {
-            session.prompt({ content: [{ type: 'text', text: continueText }], source: source })
+        // PRIMARY — DeepSeek Harness host contract: the `sessionController`
+        // service backs the generated `remote.session` namespace, whose
+        // `prompt({requestId, sessionId, mode, content})` remote admits one
+        // prompt after explicitly resuming its Session. The counting/dsh-
+        // dashboard host's per-session `session.prompt(entries, {source})`
+        // shape does NOT exist here; sending that shape made the typert
+        // gateway reject the `request` wire field as boundary-invalid
+        // (`gateway/input-invalid`). Dispatch through the host namespace with
+        // the schema it actually validates against.
+        var hostSession = resolveRemoteNamespace(_ctx, 'session')
+        if (hostSession && typeof hostSession.prompt === 'function') {
+          try {
+            // `requestId` is the client-minted, host-revalidated identity from
+            // requestIdForAttempt above. The host echoes it back on the
+            // admitted user/message entry (as its rpc identity), which is how
+            // the self-echo detector proves the message is ours (§8.4) — no
+            // change needed to the detector.
+            var signal = (typeof AbortController !== 'undefined') ? new AbortController().signal : undefined
+            emitted = true
+            Promise.resolve(hostSession.prompt({
+              requestId: requestId,
+              sessionId: _sessionId,
+              mode: 'queue',
+              content: [{ type: 'text', text: continueText }],
+            }, signal)).then(function (res) {
+              if (res && res.ok === false) {
+                var re = (res.error && ((res.error.code || 'failed') + (res.error.message ? ': ' + res.error.message : ''))) || JSON.stringify(res.error) || 'unknown'
+                console.warn('[dsh-flash-ctx-mon] auto-continue RPC rejected: ' + re)
+                _failAutoContinuePrompt(requestId, re)
+              }
+            }).catch(function (e) {
+              console.warn('[dsh-flash-ctx-mon] auto-continue RPC threw:', e)
+              var ed = (e && (e.message || e.code)) || e
+              _failAutoContinuePrompt(requestId, ed ? String(ed) : 'unknown')
+            })
+          } catch (err) {
+            emitted = false
+            console.warn('[dsh-flash-ctx-mon] auto-continue prompt failed:', err)
           }
-          emitted = true
-        } catch (err) {
-          console.warn('[dsh-flash-ctx-mon] auto-continue prompt failed:', err)
+        } else {
+          // FALLBACK — legacy counting-host per-session prompt shapes, kept for
+          // hosts that still expose the old `sessions` adaptor surface.
+          try {
+            var source = { kind: 'user', rpcId: requestId, autocontinue: true }
+            // The injected prompt returns into the conversation log as a
+            // user/message entry whose source carries the same rpcId — that is
+            // how the self-echo detector proves it is ours (§8.4).
+            if (session.prompt.length >= 2) {
+              session.prompt([{ type: 'text', text: continueText }], { source: source })
+            } else {
+              session.prompt({ content: [{ type: 'text', text: continueText }], source: source })
+            }
+            emitted = true
+          } catch (err) {
+            console.warn('[dsh-flash-ctx-mon] auto-continue prompt failed:', err)
+          }
         }
         rec.lastRequestId = requestId
         rec.lastSendAt = now
@@ -1583,6 +1683,25 @@ var _PREFS_MAX_RETRIES = 8
         _retryBySession[_sessionId] = next
         _publishAutoRetryView()
         if (!emitted) _disarmAutoRetry('internal')
+      }
+
+      /** Async stand-down when the host rejects an auto-continue prompt. The
+       *  primary path optimistically sets `emitted` and returns to armed before
+       *  the RPC settles, so if the host then refuses the queued "继续" the
+       *  failure would otherwise be swallowed (only a console.warn) while the
+       *  guard silently turns green with a spent budget — the exact `scheduled →
+       *  green with no 继续` symptom. On a real rejection we drop the guard
+       *  (→ stopped, per design §4 "prompt 失败" stands down) and surface one
+       *  visible info alert naming the cause. Only acts when the record still
+       *  matches the requestId this attempt sent, so a late failure of a
+       *  superseded attempt cannot kill a newer scheduled emission. */
+      function _failAutoContinuePrompt(requestId, detail) {
+        try {
+          var rec = _activeAutoRetryRecord()
+          if (!rec || !rec.armed || rec.lastRequestId !== requestId) return
+          _disarmAutoRetry('prompt-failed')
+          if (detail && _autoRetryExitedPending) _autoRetryExitedPending.detail = detail
+        } catch (_) {}
       }
 
       /** Schedule the guarded emission for the armed session. Backoff is
@@ -2168,10 +2287,8 @@ var _PREFS_MAX_RETRIES = 8
             if (win && win.entries) _processEntries(win.entries, { replay: true })
             _unsubscribe = binding.eventSource.subscribe(_onEventWindowChange)
           } else {
-            var snapN = 0
-            try { var _s = _sessions && _sessions.list && _sessions.list.getSnapshot ? _sessions.list.getSnapshot() : null; snapN = _s ? (_s.ids ? _s.ids.length : 0) : 0 } catch (_) {}
             console.warn('[dsh-flash-ctx-mon] SessionEventTokenSource: no binding/eventSource for session ' + _sessionId
-              + ' (' + snapN + ' session(s) in list — binding only exists for an OPEN session)')
+              + ' (binding only exists for an OPEN session)')
           }
         } catch (e) {
           console.warn('[dsh-flash-ctx-mon] SessionEventTokenSource: bindToSession error: ' + (e.message || e))
@@ -2193,19 +2310,17 @@ var _PREFS_MAX_RETRIES = 8
         _publishUnsettledView()
       }
 
-      /** Find a session id that has a live materialized binding. */
+      /** Resolve the session id to track. The host's client `sessions` face has
+       *  no counting-host `list`/`scopeOf`, so discovery is driven by the id the
+       *  rendered panel feeds in (its bound session). */
       function _findMaterializedSession() {
-        if (!_sessions) return null
+        var bound = _boundSessionId || _sessionId
+        if (!bound || !_sessions) return null
         try {
-          var snap = _sessions.list && _sessions.list.getSnapshot ? _sessions.list.getSnapshot() : null
-          var ids = snap && snap.ids
-          if (!ids || !ids.length) return null
-          for (var i = 0; i < ids.length; i++) {
-            var b = _sessions.binding(ids[i])
-            if (b && b.eventSource) return ids[i]
-          }
+          var b = _sessions.binding(bound)
+          if (b && b.eventSource) return bound
         } catch (_) {}
-        return null
+        return bound || null
       }
 
       /** Background retry: when no session is materialized yet, poll
@@ -2232,46 +2347,37 @@ var _PREFS_MAX_RETRIES = 8
         }, 1000)
       }
 
-      /** Common bind-and-subscribe logic used by start() and its retry. */
-      function _tryBindSession(ctx) {
-        // Resolve current session id
-        try {
-          _sessionId = _sessions.scopeOf(ctx)
-        } catch (_) {}
-        if (!_sessionId) {
-          _sessionId = _findMaterializedSession()
+      /** Set the session id to track. Called from the rendered panel (slot
+       *  `props.sessionId`) because the host exposes no enumerable session list
+       *  to discover the active session from. Rebinds when the panel switches
+       *  to a different session. */
+      function _setBoundSession(ctx, id) {
+        if (!id || id === _boundSessionId) return
+        _boundSessionId = id
+        if (!_sessions) {
+          try { _sessions = ctx && ctx.get ? ctx.get('sessions') : undefined } catch (_) {}
         }
+        if (!_sessions) return
+        console.log('[dsh-flash-ctx-mon] SessionEventTokenSource: bound to injected session ' + id)
+        _refreshWorkspaces()
+        _reset()
+        _sessionId = id
+        _bindToSession()
+      }
+
+      /** Common bind logic used by start() and setSessionId(). The host's
+       *  client `sessions` face has no counting-host `list`/`scopeOf`, so the
+       *  tracked id comes from the injected panel session (or the first known
+       *  bound id). */
+      function _tryBindSession(ctx) {
+        // Prefer the session fed from the rendered panel; fall back to any
+        // currently-known session id.
+        if (!_sessionId) _sessionId = _findMaterializedSession()
         console.log('[dsh-flash-ctx-mon] SessionEventTokenSource: sessions service found, sessionId=' + (_sessionId || '(none)')
-          + (_sessionId ? ' (materialized)' : ' — no session open in UI'))
+          + (_sessionId ? ' (bound)' : ' — no session open in UI'))
 
-        // Always subscribe to the session list store to detect both:
-        //  1) a session appearing when none existed, and
-        //  2) the user switching to a different session
-        //  (Critical Rule 12: subscribe unconditionally)
-        try {
-          var listStore = _sessions.list
-          if (listStore && listStore.subscribe) {
-            _listUnsubscribe = listStore.subscribe(function () {
-              var newId = null
-              try { newId = _sessions.scopeOf(ctx) } catch (_) {}
-              if (!newId) {
-                newId = _findMaterializedSession()
-              }
-              if (newId && newId !== _sessionId) {
-                _reset()
-                _sessionId = newId
-                _bindToSession()
-              } else if (!newId && _sessionId) {
-                console.log('[dsh-flash-ctx-mon] SessionEventTokenSource: bound session no longer materialized, resetting')
-                _reset()
-                _sessionId = null
-                _scheduleBindRetry(ctx)
-              }
-            })
-          }
-        } catch (_) {}
-
-        // If we already have a session, bind immediately
+        // If we already have a session, bind immediately; otherwise keep
+        // polling until the panel reports one via setSessionId().
         if (_sessionId) {
           _bindToSession()
         } else {
@@ -2316,6 +2422,7 @@ var _PREFS_MAX_RETRIES = 8
           _listUnsubscribe = null
           _sessions = null
           _sessionId = null
+          _boundSessionId = null
           _ctx = null
         },
 
@@ -2388,6 +2495,10 @@ var _PREFS_MAX_RETRIES = 8
            *  to). Null when no session is materialized. Used by the alert provider
            *  to reject a stale continue-offer after a session switch. */
           getSessionId: function () { return _sessionId },
+          /** Bind the runner to a specific session id. The rendered panel calls
+           *  this with its slot-injected `props.sessionId`; the runner needs a
+           *  known id because the host exposes no enumerable session list. */
+          setSessionId: function (id) { _setBoundSession(_ctx, id) },
 
           // ── Watchdog (unfinished-turn) public API ─────────────────────────
           // Form ① detection surface (docs/detecting-unfinished-session.zh-CN.md
@@ -2505,6 +2616,7 @@ var _PREFS_MAX_RETRIES = 8
       var _ctx = null
       var _sessions = null
       var _sessionId = null
+      var _boundSessionId = null
       var _bindingUnsub = null
       var _listUnsub = null
       var _retryTimer = null
@@ -2645,10 +2757,13 @@ var _PREFS_MAX_RETRIES = 8
         }
       }
 
-      /** Re-resolve the main-view session and rebind when it changed. */
+      /** Re-resolve the tracked session and rebind when it changed. Prefers the
+       *  id injected from the rendered panel (slot `props.sessionId`); falls
+       *  back to findMainViewSessionId when the host exposes an enumerable list
+       *  (it does not on this host). */
       function _syncSession() {
         if (!_sessions) return
-        var id = findMainViewSessionId(_sessions)
+        var id = _boundSessionId || findMainViewSessionId(_sessions)
         if (id === _sessionId) return
         _unbind()
         _bindRetryCount = 0
@@ -2660,6 +2775,19 @@ var _PREFS_MAX_RETRIES = 8
         // read against the new id.
         _clearSkills()
         if (id && !_bind(id)) _scheduleBindRetry(id)
+      }
+
+      /** Bind the tracker to a specific session id, fed from the rendered panel.
+       *  The host exposes no enumerable session list, so this is the
+       *  authoritative "current session" signal. */
+      function _bindInjected(id) {
+        if (!id || id === _boundSessionId) return
+        _boundSessionId = id
+        if (!_sessions) {
+          try { _sessions = _ctx && _ctx.get ? _ctx.get('sessions') : undefined } catch (_) {}
+        }
+        if (!_sessions) return
+        _syncSession()
       }
 
       function _scheduleBindRetry(id) {
@@ -2691,6 +2819,10 @@ var _PREFS_MAX_RETRIES = 8
       }
 
       function _attachList() {
+        // The host's client `sessions` face has no enumerable `list` to
+        // subscribe to; session changes are instead driven by the rendered
+        // panel's injected sessionId (see _bindInjected). Keep this a guarded
+        // no-op so a counting host that DOES expose .list still works.
         if (_listUnsub || !_sessions) return
         try {
           if (_sessions.list && typeof _sessions.list.subscribe === 'function') {
@@ -2715,6 +2847,7 @@ var _PREFS_MAX_RETRIES = 8
           if (_retryTimer) { clearTimeout(_retryTimer); _retryTimer = null }
           _sessions = null
           _sessionId = null
+          _boundSessionId = null
           _ctx = null
           _clearSkills()
           _listeners = []
@@ -2733,6 +2866,11 @@ var _PREFS_MAX_RETRIES = 8
         },
 
         getSessionId: function () { return _sessionId },
+
+        /** Bind the tracker to a specific session id, fed from the rendered
+         *  panel's slot-injected `props.sessionId` (the authoritative current
+         *  session on hosts that expose no enumerable session list). */
+        setSessionId: function (id) { _bindInjected(id) },
 
         getSkills: function () {
           var out = []
@@ -2975,7 +3113,8 @@ var _PREFS_MAX_RETRIES = 8
             message: function () {
               var reasonText = t(autoRetryExitedReasonKey(exitedPending.reason))
               var locate = autoRetryExitedLocate(exitedPending.sessionId, exitedPending.workspace)
-              return locate ? reasonText + locate : reasonText
+              var detail = exitedPending.detail ? (' · ' + exitedPending.detail) : ''
+              return locate ? reasonText + locate + detail : reasonText + detail
             },
             icon: '🔁',
             timestamp: exitedAt,
@@ -3734,22 +3873,23 @@ var _PREFS_MAX_RETRIES = 8
         { key: 'ctxThresholdInfo',    labelKey: 'ctxThresholdInfo',    tooltipKey: 'ctxThresholdInfoTip',    min: 30,    max: 80,     step: 1,    format: function (v) { return v + '%' } },
         { key: 'ctxThresholdWarning', labelKey: 'ctxThresholdWarning', tooltipKey: 'ctxThresholdWarningTip', min: 50,    max: 92,     step: 1,    format: function (v) { return v + '%' } },
         { key: 'ctxThresholdError',   labelKey: 'ctxThresholdError',   tooltipKey: 'ctxThresholdErrorTip',   min: 70,    max: 98,     step: 1,    format: function (v) { return v + '%' } },
-        { key: 'ctxPollBase',         labelKey: 'ctxPollBase',         tooltipKey: 'ctxPollBaseTip',         min: 5000,  max: 60000,  step: 1000, format: function (v) { return v + 'ms' } },
-        { key: 'ctxPollMin',          labelKey: 'ctxPollMin',          tooltipKey: 'ctxPollMinTip',          min: 1000,  max: 10000,  step: 500,  format: function (v) { return v + 'ms' } },
+        { key: 'ctxPollBase',         labelKey: 'ctxPollBase',         tooltipKey: 'ctxPollBaseTip',         min: 5000,  max: 60000,  step: 1000, format: _fmtSeconds },
+        { key: 'ctxPollMin',          labelKey: 'ctxPollMin',          tooltipKey: 'ctxPollMinTip',          min: 1000,  max: 10000,  step: 500,  format: _fmtSeconds },
       ],
     }
 
     // Auto-Retry tuning slider fields — the five numeric scalars rendered in
-    // the same stacked cell style as the context parameters.
-    function _fmtMs(v) { return v + 'ms' }
+    // the same stacked cell style as the context parameters. The time scalars
+    // are stored as milliseconds but displayed in seconds.
+    function _fmtSeconds(v) { return (Number(v) || 0) / 1000 + 's' }
     function _fmtCount(v) { return String(v) }
 
     var AUTO_RETRY_SLIDER_FIELDS = [
-      { key: 'autoRetryGraceMs',        labelKey: 'autoRetryGraceMs',         tooltipKey: 'autoRetryGraceMsTip',         min: 1000,   max: 30000,   step: 500,   format: _fmtMs },
-      { key: 'autoRetryCooldownMs',     labelKey: 'autoRetryCooldownMs',      tooltipKey: 'autoRetryCooldownMsTip',      min: 5000,   max: 120000,  step: 5000,  format: _fmtMs },
+      { key: 'autoRetryGraceMs',        labelKey: 'autoRetryGraceMs',         tooltipKey: 'autoRetryGraceMsTip',         min: 1000,   max: 30000,   step: 500,   format: _fmtSeconds },
+      { key: 'autoRetryCooldownMs',     labelKey: 'autoRetryCooldownMs',      tooltipKey: 'autoRetryCooldownMsTip',      min: 5000,   max: 120000,  step: 5000,  format: _fmtSeconds },
       { key: 'autoRetryMaxConsecutive', labelKey: 'autoRetryMaxConsecutive',  tooltipKey: 'autoRetryMaxConsecutiveTip',  min: 1,      max: 12,      step: 1,     format: _fmtCount },
-      { key: 'autoRetryMaxBackoffMs',   labelKey: 'autoRetryMaxBackoffMs',    tooltipKey: 'autoRetryMaxBackoffMsTip',    min: 10000,  max: 900000,  step: 10000, format: _fmtMs },
-      { key: 'autoRetryEchoWindowMs',   labelKey: 'autoRetryEchoWindowMs',    tooltipKey: 'autoRetryEchoWindowMsTip',    min: 5000,   max: 120000,  step: 1000,  format: _fmtMs },
+      { key: 'autoRetryMaxBackoffMs',   labelKey: 'autoRetryMaxBackoffMs',    tooltipKey: 'autoRetryMaxBackoffMsTip',    min: 10000,  max: 900000,  step: 10000, format: _fmtSeconds },
+      { key: 'autoRetryEchoWindowMs',   labelKey: 'autoRetryEchoWindowMs',    tooltipKey: 'autoRetryEchoWindowMsTip',    min: 5000,   max: 120000,  step: 1000,  format: _fmtSeconds },
     ]
 
     var MONITOR_TITLE_KEY = {
@@ -4603,6 +4743,22 @@ var _PREFS_MAX_RETRIES = 8
         if (!tracker || typeof tracker.subscribe !== 'function') return undefined
         return tracker.subscribe(function () { setTick(function (v) { return v + 1 }) })
       }, [])
+
+      // Bind the auto-continue runner and skill tracker to the session this
+      // chip is rendering for. The host exposes no enumerable session list, so
+      // the slot-injected `props.sessionId` is the authoritative "current
+      // session". Only a session with skills shown here mounts — the runner
+      // (and the quick switch's arm/disarm) then always targets an
+      // actually-open session.
+      useEffect(function () {
+        if (!sessionId) return
+        if (_activeTokenSource && typeof _activeTokenSource.setSessionId === 'function') {
+          _activeTokenSource.setSessionId(sessionId)
+        }
+        if (_activeSkillTracker && typeof _activeSkillTracker.setSessionId === 'function') {
+          _activeSkillTracker.setSessionId(sessionId)
+        }
+      }, [sessionId])
 
       // Layout effect: which bar this session's chip belongs on has to be
       // settled before the browser paints, so that a session with a tab strip

@@ -1,5 +1,5 @@
-// Default export only (`export default Schema`); there is no named `Schema`.
 import Schema from '@deepseek-ai/schemastery';
+import { writeFileSync, mkdirSync } from 'node:fs';
 export const name = 'dsh-flash-ctx-mon';
 // No host-side service dependencies; all services are injected lazily.
 export const inject = [];
@@ -63,6 +63,68 @@ export const Config = Schema.object({
 export function apply(ctx, config) {
     // ── Settings namespace registration ──────────────────────────────────
     ctx.inject(['settings'], (settingsCtx) => {
-        settingsCtx.effect(() => settingsCtx.settings.configure({ auto: false }, ctx.fiber));
+        settingsCtx.effect(() => {
+            // Runtime diagnostic for the "Configuration for \"dsh-flash-ctx-mon\"
+            // is overridden by a home patch or command-line overlay" rejection.
+            // The host's config-editor refuses an edit when its recomposed profile
+            // patches for this id differ from the candidate config. This prints the
+            // SAME composition the guard sees, so a rejected edit can be traced to
+            // its exact source (bundle layer, profile patch, home patch, overlay).
+            try {
+                const pc = settingsCtx.get('profileContext');
+                const editor = settingsCtx.get('configEditor');
+                const watchContext = editor?.['ownerContext']?.profileContext;
+                const CE_ID = 'dsh-flash-ctx-mon';
+                let entryInfo;
+                try {
+                    const cfg = editor?.configuration?.();
+                    const row = cfg
+                        ?.find?.((r) => r.entry?.options?.id === CE_ID);
+                    entryInfo = row
+                        ? { inheritedKeys: Object.keys((row.inherited ?? {})), override: row.override }
+                        : { found: false, ids: cfg?.map((r) => r.entry?.options?.id) };
+                }
+                catch (e2) {
+                    entryInfo = { configurationErr: e2 && e2.message };
+                }
+                console.log('[dsh-flash-ctx-mon] host profileContext:', JSON.stringify({
+                    patchPath: pc?.patchPath ?? watchContext?.patchPath,
+                    profileDir: pc?.dir ?? watchContext?.dir,
+                    home: pc?.home,
+                    startedBundles: pc?.startedBundles,
+                    overlays: (pc ?? watchContext)?.overlays,
+                    hasEditor: editor !== undefined,
+                    entryId: editor?.entries?.()?.find?.((en) => en.options?.id === CE_ID)?.options?.id,
+                    entryInfo,
+                }, null, 2));
+                // ALSO persist to a file in the plugin source dir so the agent can read it
+                // without the user's host console (the desktop host stdout is not on disk).
+                try {
+                    try {
+                        mkdirSync('C:/codes/ai-test/dsh-flash-ctx-mon/.diag', { recursive: true });
+                    }
+                    catch { /* noop */ }
+                    writeFileSync('C:/codes/ai-test/dsh-flash-ctx-mon/.diag/host-profileContext.json', JSON.stringify({
+                        ts: new Date().toISOString(),
+                        pid: process.pid,
+                        patchPath: pc?.patchPath ?? watchContext?.patchPath,
+                        profileDir: pc?.dir ?? watchContext?.dir,
+                        home: pc?.home,
+                        startedBundles: pc?.startedBundles,
+                        overlays: (pc ?? watchContext)?.overlays,
+                        hasEditor: editor !== undefined,
+                        entryId: editor?.entries?.()?.find?.((en) => en.options?.id === CE_ID)?.options?.id,
+                        entryInfo,
+                    }, null, 2));
+                }
+                catch (e3) {
+                    console.warn('[dsh-flash-ctx-mon] diag-file error:', e3 && e3.message);
+                }
+            }
+            catch (e) {
+                console.warn('[dsh-flash-ctx-mon] diagnostic error:', e && e.message);
+            }
+            return settingsCtx.settings.configure({ auto: false }, ctx.fiber);
+        });
     });
 }
