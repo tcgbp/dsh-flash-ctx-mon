@@ -60,6 +60,7 @@ export function makeDisarmedState() {
     paused: false,
     sessionId: null,
     remaining: 0,
+    maxConsecutive: 0,
     backoffLevel: 0,
     cooldownUntil: null,
     lastSendAt: null,
@@ -78,7 +79,12 @@ export function armState(state, sessionId, remaining, nowMs) {
     armed: true,
     paused: false,
     sessionId: sessionId == null ? null : String(sessionId),
+    // The record remembers the budget it was armed with so the attempt
+    // counter (`maxConsecutive - remaining + 1`) keeps counting against the
+    // original limit even if the config slider moves mid-session. When a
+    // record is freshly armed, `remaining` IS the starting budget.
     remaining: remaining > 0 ? remaining : 0,
+    maxConsecutive: remaining > 0 ? remaining : 0,
     backoffLevel: 0,
     cooldownUntil: null,
     lastSendAt: nowMs == null ? null : nowMs,
@@ -110,6 +116,9 @@ export function consumeContinuation(state, nowMs, cooldownMs) {
     paused: !!prev.paused,
     sessionId: prev.sessionId == null ? null : String(prev.sessionId),
     remaining: Math.max(0, (prev.remaining || 0) - 1),
+    // Preserve the armed budget so the attempt counter stays stable across
+    // consecutive continues within the same session.
+    maxConsecutive: prev.maxConsecutive || 0,
     backoffLevel: (prev.backoffLevel || 0) + 1,
     cooldownUntil: scheduleCooldown(nowMs, cooldownMs),
     lastSendAt: nowMs == null ? null : nowMs,
