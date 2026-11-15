@@ -13,6 +13,8 @@ hold the settings namespace and schema.
 
 ## Unreleased
 
+## 0.2.3
+
 **A host-rejected auto-continue now stands the guard down with a visible toast.**
 When the queued resume prompt for an armed session comes back rejected from the
 host (`res.ok === false`, or the RPC throws — e.g. `session/not-found`,
