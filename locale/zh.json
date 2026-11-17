@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "上下文监控",
+    "description": "`dsh-flash` 快捷控制面板的上下文监控提供方 —— 通过 ctx.get('dshFlashAlerts') 注册上下文告警提供方（会话 token 用量估算），并通过 DSH 会话事件跟踪上下文窗口压力。",
+    "detail": "README.zh-CN.md"
+  }
+}
