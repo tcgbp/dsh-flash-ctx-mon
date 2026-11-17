@@ -1,5 +1,79 @@
 import Schema from '@deepseek-ai/schemastery';
 import { writeFileSync, mkdirSync } from 'node:fs';
+/** Fold a judge's StreamChunk stream into plain text (minimal assembler).
+ *  Auxiliary judge output is tiny, so we only need [text-delta] deltas and a
+ *  stop signal — no tool-call/reasoning assembly is required. */
+function assembleJudgeText(stream) {
+    return (async () => {
+        let out = '';
+        for await (const chunk of stream) {
+            if (chunk && chunk.type === 'text-delta' && typeof chunk.text === 'string') {
+                out += chunk.text;
+            }
+        }
+        return out.trim();
+    })();
+}
+/** Extract a compact prompt from a projected Message[] (last user ask + last
+ *  assistant reply). We never mutate the projection — read-only. */
+function lastExchange(messages) {
+    const snippets = [];
+    for (let i = messages.length - 1; i >= 0 && snippets.length < 2; i -= 1) {
+        const m = messages[i];
+        if (m.role !== 'user' && m.role !== 'assistant')
+            continue;
+        const c = m.content;
+        let text = '';
+        if (typeof c === 'string')
+            text = c;
+        else if (Array.isArray(c)) {
+            text = c
+                .map((b) => (b?.type === 'text' && typeof b.text === 'string' ? b.text : ''))
+                .join(' ');
+        }
+        if (text.trim())
+            snippets.unshift(`${m.role}: ${text.slice(0, 600)}`);
+    }
+    return snippets.join('\n');
+}
+/** Run one auxiliary LLM call that judges whether the closing turn ended
+ *  normally. Pure input (durable projection), side-effect-free, fail-soft. */
+export async function runEndingJudgement(params) {
+    const { session, llm, provider, model, signal } = params;
+    const messages = session.deriveMessages();
+    const context = lastExchange(messages);
+    const system = 'You are a session-health observer. Given the tail of a conversation, decide ' +
+        'whether the turn appears to have ended NORMALLY (a settled, coherent response ' +
+        'that answered/advanced the user request) vs ABRUPTLY (cut off, an unfinished ' +
+        'tool chain, an error, or a stall the model should have continued). ' +
+        'Reply with JSON only: {"endedNormally": boolean, "reason": string, "confidence": number}.';
+    const prepared = await llm.prepareCall({ provider, model }, signal);
+    const stream = prepared.stream({
+        provider,
+        model,
+        system,
+        messages: [
+            { role: 'user', content: `End of the conversation tail:\n${context || '(empty)'}` },
+        ],
+        temperature: 0,
+        maxTokens: 400,
+    });
+    const text = await assembleJudgeText(stream);
+    if (!text)
+        return { endedNormally: false, reason: 'judge returned no output', raw: text };
+    try {
+        const parsed = JSON.parse(text);
+        return {
+            endedNormally: parsed.endedNormally === true,
+            reason: typeof parsed.reason === 'string' ? parsed.reason : '(no reason)',
+            confidence: typeof parsed.confidence === 'number' ? parsed.confidence : undefined,
+            raw: text,
+        };
+    }
+    catch {
+        return { endedNormally: true, reason: 'judge output not JSON; kept as observation', raw: text };
+    }
+}
 export const name = 'dsh-flash-ctx-mon';
 // No host-side service dependencies; all services are injected lazily.
 export const inject = [];
@@ -58,9 +132,54 @@ export const Config = Schema.object({
     autoRetryMaxBackoffMs: Schema.number().default(DEFAULT_AUTO_RETRY_MAX_BACKOFF_MS).volatile(),
     autoRetryContinueText: Schema.string().default(DEFAULT_AUTO_RETRY_CONTINUE_TEXT).volatile(),
     autoRetryEchoWindowMs: Schema.number().default(DEFAULT_AUTO_RETRY_ECHO_WINDOW_MS).volatile(),
+    // Optional route override for the log-only LLM turn-ending judge. Empty
+    // string = unset; we then fall back to the closing agent's own provider/model.
+    judgeProvider: Schema.string().default(''),
+    judgeModel: Schema.string().default(''),
 });
 // ── apply() ─────────────────────────────────────────────────────────────
 export function apply(ctx, config) {
+    // ── Log-only LLM turn-ending judge — agent/turn-stopping ────────────
+    // Observational only: logs whether a closing turn looks normally-ended.
+    // Never blocks turn closure (listener returns void; judgement runs detached),
+    // never touches inbox, never appends a session/event, never edits the loop.
+    // Fail-safe: any absence/error -> warn log, never throw, never intercept.
+    // `agent/turn-stopping` is a DSH runtime event not typed in this package's
+    // Cordis `Events`; register through the untyped overload for observation.
+    ;
+    ctx.on('agent/turn-stopping', (payload) => {
+        try {
+            const { agent, turn, signal } = payload;
+            const llm = ctx.get?.('llm');
+            if (!llm) {
+                ctx.logger?.info?.('[ctx-mon] LLM judge: "llm" service unavailable — no host-side route; skipping judgement');
+                return;
+            }
+            const session = agent?.session;
+            if (!session || typeof session.deriveMessages !== 'function') {
+                ctx.logger?.info?.('[ctx-mon] LLM judge: agent has no session projection; skipping judgement');
+                return;
+            }
+            const provider = config?.judgeProvider || agent?.options?.provider;
+            const model = config?.judgeModel || agent?.options?.model;
+            if (!provider || !model) {
+                ctx.logger?.info?.('[ctx-mon] LLM judge: no provider/model route known; skipping judgement');
+                return;
+            }
+            // Fire-and-forget: keep this serial listener async-non-blocking so the
+            // turn can close immediately; the judgement and its log land when ready.
+            void runEndingJudgement({ session, llm, provider, model, signal })
+                .then((j) => {
+                ctx.logger?.info?.('[ctx-mon] LLM turn-ending judgement', JSON.stringify({ turn, endedNormally: j.endedNormally, reason: j.reason, confidence: j.confidence }));
+            })
+                .catch((err) => {
+                ctx.logger?.warn?.('[ctx-mon] LLM turn-ending judgement failed:', err?.message ?? String(err));
+            });
+        }
+        catch (err) {
+            ctx.logger?.warn?.('[ctx-mon] agent/turn-stopping listener error:', err?.message ?? String(err));
+        }
+    });
     // ── Settings namespace registration ──────────────────────────────────
     ctx.inject(['settings'], (settingsCtx) => {
         settingsCtx.effect(() => {
