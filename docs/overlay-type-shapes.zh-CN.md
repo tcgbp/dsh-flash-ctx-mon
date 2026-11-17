@@ -132,7 +132,7 @@ autoRetryEl → alertPreviewEl → ctxLiveDataEl`。
 | `getAutoRetryView()` | 快照：`{state:'stopped'|'armed'|'scheduled'|'paused', sessionId, remaining, maxConsecutive, backoffLevel, cooldownUntil, nextEmitAtMs, lastSendAt, lastRequestId, inCooldown, continueText, graceMs, cooldownMs, maxBackoffMs, echoWindowMs, attemptIndex?}`（L1164-1190）。 |
 
 > `state` 计算：无记录→`stopped`；`paused`→`paused`；`pending`→`scheduled`；否则→`armed`（L1168）。
-> `attemptIndex = Math.max(1, maxConsecutive - remaining + 1)`（仅当记录有 `maxConsecutive` 时；否则 `0`，L1184-1188）。
+> `attemptIndex = max(0, maxConsecutive - remaining)` —— 已真正发送的补发次数：武装后为 0，每真正发送一次 `remaining` 递减 1 从而 +1（仅当记录有 `maxConsecutive` 时；否则 `0`）。
 
 ### 4.3 runner（内联于 `createSessionEventTokenSource` L909；状态 L935-967、视图 L1164-1190、发布 L1194-1198）
 

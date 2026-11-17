@@ -1830,7 +1830,9 @@ var _PREFS_MAX_RETRIES = 8
           echoWindowMs: _alertPref('autoRetryEchoWindowMs'),
         }
         if (rec && rec.maxConsecutive) {
-          base.attemptIndex = Math.max(1, rec.maxConsecutive - rec.remaining + 1)
+          // Sent-count: 0 right after arming, +1 per really-sent auto-continue
+          // (remaining, spent by consumeContinuation only on an actual send).
+          base.attemptIndex = Math.max(0, rec.maxConsecutive - rec.remaining)
         } else {
           base.attemptIndex = 0
         }
