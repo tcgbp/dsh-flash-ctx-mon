@@ -1103,7 +1103,7 @@ var _PREFS_MAX_RETRIES = 8
       try {
         var btns = document.querySelectorAll('[data-dsh-flash-trigger]')
         var suffix = t('autoRetryHint') || 'auto-continue active'
-        var hint = suffix + ' · attempt ' + (idx > 0 ? (idx + '/' + max) : String(idx))
+        var hint = suffix
         for (var i = 0; i < btns.length; i++) {
           btns[i].setAttribute('data-ctx-mon-autoretry-attempt', label)
           btns[i].setAttribute('title', hint)
