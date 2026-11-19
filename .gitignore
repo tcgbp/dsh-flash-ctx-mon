@@ -5,3 +5,6 @@ node_modules/
 # `pnpm pack` from the tagged commit and uploaded to a GitHub Release; a stale
 # one sitting in the tree is how a release ships the previous build.
 *.tgz
+
+# Mnemon managed memory (local projection/cache; not part of the plugin source).
+.mnemon/
