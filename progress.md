@@ -1,5 +1,86 @@
 # 进度日志
 
+## 会话：修复并发 auto-continue arm 导致的 session-binding 问题（service-retry + isBound 门控开关）
+
+### 需求与用户确认（Option 2）
+- **根因**：跨 session 切换永久绑定失败。`ctx.get('sessions')` service 为 null/undefined 时，
+  `_sessionId`/`_unsubscribe` 恒为 null；陈旧 `_boundSessionId` + `id===_boundSessionId` 短路阻止恢复；
+  而旧实现单次 3s retry 后永久放弃 → Quick Control 的 auto-continue 开关（order:62，`data-ctx-mon-autoretry`）永不显示。
+- 用户选择 **Option 2**：直接编辑源码 `src-client/factory-body.js`，随后手动同步构建产物 `lib/client.js`
+  （免重建即可生效）；已授权除破坏性外的保守编辑。
+- **绑定失败呈现已敲定为完全隐藏（非 disabled）** —— 开关 **仅在 session 绑定成功后显示**（不再询问）。
+
+### 两阶段修复
+- **Part 1（service retry）**：session service 恢复路径永久就绪，`_sessionId`/`_unsubscribe` 一上线即可用。
+  - scope-1 加模块级 `var _serviceRetryTimer = null`（src L1069 / lib L982）。
+  - `_setBoundSession`（src L~2180 / lib 1674）：`_sessions` 缺失时改为 `if (!_ctx) _ctx = ctx; _scheduleServiceRetry(); return;`，
+    不再因服务缺失直接丢 id；凭 `_injectedSessionId` 恢复绑定并 log `bound to injected session`。
+  - `start`（src L2206 / lib 1732）：先 `_ctx = ctx`；`ctx.get('sessions')` 取不到则 warn + `_scheduleServiceRetry()` 后 return。
+  - 新函数 `_scheduleServiceRetry()`（src L2190 / lib 1725）：`if (_serviceRetryTimer) return` 防重复；
+    1s 后若 `_sessions` 已有则 `_tryBindSession(_ctx)`；否则重查服务并成功时 log `sessions service available on retry`、再 `_tryBindSession`，失败递归自续。
+  - `stop`（src L2220 / lib 1750）：清理 `_serviceRetryTimer`（`clearTimeout` + 置 null）→ 不再有 stop 后定时器对 null `_ctx` 触发 `_tryBindSession` 的风险。
+- **Part 2（仅绑定成功后显示开关）**：
+  - 新增 `isBound()`（src L2311 / lib 1850）：`!!(_sessionId && _unsubscribe)`（id 非空且 eventSource 订阅已建立）。
+  - Quick Control `visible`（src L4628 / lib 3917）：`_getAlertsOn()` false 短路；否则 `_activeTokenSource.isBound()`。
+  - 发布链（跨作用域）：scope-1 加模块级 `var _notifyAutoRetryQuick = null`（src L674 / lib 745）。
+    - `_bindToSession` 订阅建立后（src L2062 / lib 1641）：`_notifyAutoRetryQuick()` → panel 重估 visible → 绑定成功即显示。
+    - `_reset`（src L2040 / lib 1606）：`hadSubscription = !!_unsubscribe` 守卫，解绑后若有订阅被拆除才通知 → 开关隐藏。
+    - `_registerServices(registry2, alertRegistry2)` effect（src L4587 / lib 3873）：赋 `_notifyAutoRetryQuick = registry2.notifyChange(RUNNER_QUICK_KEY)+alertRegistry2.notify()` 闭包；
+      dispose（src L4649 / lib 3943）返回静默清理：`_notifyAutoRetryQuick = null; try { dispose() } catch (_) {}`；effect 标签 `dsh-flash-ctx-mon: auto-continue quick switch` 保留。
+
+### 一致性核验
+- `node --check lib/client.js` 与 `node --check src-client/factory-body.js` **均通过（exit 0）**。
+- grep 交叉核对 src↔lib：`_notifyAutoRetryQuick` 两侧各 7/12 处引用齐备；`_serviceRetryTimer`、`_scheduleServiceRetry`、
+  `hadSubscription`、`sessions service available on retry`、`bound to injected session`、`isBound`、order:62 `visible` 门控在两侧一一对应。
+- `lib/client.js` 现有 skill tracker 作用域另有一份 `_scheduleServiceRetry`（30×1s `_retryCount`，src L2072/lib 2072）——为既有独立功能，非本次改动，保留。
+
+### 验证边界
+- 行为闭环：未绑定 → 开关隐藏；服务注册→`_tryBindSession`→订阅建立→`_notifyAutoRetryQuick`→`isBound()` true→**开关显示**；
+  会话切换/解绑 → `_reset`（hadSubscription）→ 通知 → 隐藏；关系统告警 → `_getAlertsOn()` false → 隐藏。
+- headless 冒烟 `import('./lib/client.js')`：模块解析成功，仅因无 DOM `window is not defined` 止步 —— 符合 Web client bundle 预期（非改动引入错误），
+  需在 GUI 运行时加载。
+- 浏览器完整显隐验证受环境限制（主力 3080 需要随机 token 且禁重启主力；独立沙箱缺 `dsh-flash` provider 无法呈现 order:62 行），故以代码级一致性 + 语法核验为准。
+
+### 遵循约定
+- 未改主力 profile / 未动用户 dsh-flash 重构文件；未设 `sandbox_permissions`（审批已禁用）。
+- 沙箱 `sb-ctx-mon` 为一次性验证 profile，已按其用途可复用或清理，与主力隔离。
+
+## 会话：模型最后一段输出是疑问句时，自动继续跳过本次补发、等待用户回答
+
+### 需求与用户确认
+- 探索审计 `dsh-flash-ctx-mon` 客户端插件自动重试/自动继续逻辑时，用户提出行为期望：**当模型的最后一段文本包含问号（`?` 或 `？`）时，跳过本次的自动发送「继续」，等待用户回答**。
+- 经 `ask_user_question` 确认绑定方案：**仅跳过本次补发，守卫保持待命（推荐）** —— 不停止整个会话的自动继续、也不改为 paused；主自动继续偏好不变；下一次回合结束仍按正常规则评估。
+
+### 设计要点
+- **判定输入**：`_lastAssistantText`（最近一条完整助手消息文本 = 模型最终输出 = 「最后一段文字」），与 §4 `isHandoffStub` 检查的是同一段文本，符合用户「最后一段文字」的规则。
+- **判定函数**：新纯函数 `textHasQuestionMark(text)`，规则是「包含问号」（`indexOf('?')!==-1 || indexOf('？')!==-1`），**不是** endsWith；空/非字符串输入返回 `false`。
+- **语义**：只跳过**这一个回合**的自动「继续」；守卫**保持 armed（不解除）**。用户回答后进入新一轮，回合结束再按常规规则判断是否自动继续。跳过不消耗连续预算、不触发退出告警。
+- **落地位置**：`_handleTurnEnd` 公共调度点 —— 在 `_armAutoRetry()` / `_activeAutoRetryRecord()` / `remaining<=0` 之后、`_scheduleAutoRetryEmit()` 之前拦截 `if (mustWaitForAnswer) { _publishAutoRetryView(); return }`。这样可重试结束（error/interrupted/max-tokens）与已武装会话的正常完成都在同一点生效。回放路径不调用 `_handleTurnEnd`（`!replay` 守卫），不受影响。
+
+### 已执行操作
+- [x] `src-client/auto-retry.js`：新增导出 `textHasQuestionMark(text)`（位于 `isHandoffStub` 与 `isSelfEcho` 之间，`export function` 风格，含 JSDoc 说明）。
+- [x] `src-client/factory-body.js`：import 块补入 `textHasQuestionMark`（L60）；`_handleTurnEnd` 计算 `mustWaitForAnswer` 并在调度前拦截跳过本次补发、守卫保持 armed、调用 `_publishAutoRetryView()` 后返回；注释引用 §5「疑问句结尾」。
+- [x] `test/auto-retry.test.js`：新增 `describe('textHasQuestionMark', …)`（半角 `?` / 全角 `？` / 空与非法输入 / 无问号文本 共 4 组用例）。
+- [x] `node scripts/build-client.mjs` 重建 `lib/client.js`（191.8kb）：bundle 含 `textHasQuestionMark`（L210）与 `mustWaitForAnswer`（L1551、L1569）。
+- [x] 更新 CHANGELOG.md Unreleased（新增「疑问句结尾不再自动补发」段）、README.md / README.zh-CN.md（自动继续章节新增「模型提问时停下来等回答」段）、docs/auto-retry-integration-design.zh-CN.md（§5 新增护栏第 9 条）。
+
+### 测试
+- [x] `npx vitest run test/auto-retry.test.js`：**44/44**（含 4 个 `textHasQuestionMark` 用例）。
+- [x] `node scripts/build-client.mjs` exit 0；bundle grep 复核 `textHasQuestionMark` / `mustWaitForAnswer` 存在。
+
+### 约束遵守
+- 仅改动本方文件；未触碰用户 dsh-flash 重构 ` M` 文件；未设置 `sandbox_permissions`。
+
+### 待办
+- [ ]（如需要）GUI 浏览器验证：武装会话跑一个以问号结尾的回合 → 本回合不再自动发「继续」、守卫仍待命绿；用户回答后再触发下一个可判定回合仍按常规自动继续。
+- [x] 全量 `npx vitest run --pool=threads` 已通过：**98/98**（94 基础 + 4 新增 `textHasQuestionMark` 用例）。
+
+#### 视觉调整（会话追加）
+- **闪电图标本体保持原色**：删除自动继续状态下对 `[data-dsh-flash-trigger]` 本体的三态 `color:…!important` 覆盖，闪电图形及其半透明描边回到 dsh-flash 默认配色（不再随自动继续状态变色）；保留外围发光框（绿/橙/红）与 attempt 角标作为状态指示。（用户确认：去掉的是对闪电本体描边的变色，不是外围椭圆框。）
+- **继续计数角标字号 9px→10px**：`[data-ctx-mon-autoretry-attempt]::after` 的 `font-size` 由 9px 提到 10px，与 dsh-flash 告警计数角标一致（用户拍板选 10px）。
+- [x] 已重建 bundle（191.7kb）并复核：无三态 color 变色规则残留；badge 字号已为 10px、无 9px 残留。
+- [x] 全量 `npx vitest run --pool=threads` 仍 **98/98**。
+
 ## 会话：已中断/已暂停(paused)会话可重新开启自动继续
 
 ### 需求与用户确认
@@ -276,3 +357,31 @@
 |------|---------|
 | 误 checkout 丢弃用户 dsh-flash 改名 | 恢复 + build:client 同步 lib（用户确认） |
 | vitest forks pool 失败（Win 沙箱） | 改用 --pool=threads，62/62 通过 |
+
+---
+
+## Part 3：修复「flash 图标触发位置改变 → 自动继续计数完全消失」（2026-11-19）
+
+### 现状
+- **目标达成**：位置切换后（绑定成功时）计数角标 / rearm chip 恢复显示。
+- **根因**：dsh-flash `applyTrigger()` 位置切换总现 `unmountOverlayTrigger()` + `mountOverlayTrigger()`，末尾 `document.body.appendChild(el)` 重建全新 trigger button → 无 ctx-mon stamp 属性、无切换后事件 → badge(`::after`)/rearm chip 随旧按钮一起消失，且没有新 publish 来重画。
+
+### 已执行（src 与 lib 同步，六符号双写一致）
+- [x] `src-client/factory-body.js`（scope-1，`_clearAutoRetryDomIndicator` 后 L998-1052）新增：
+  - `var _triggerRepaintObserver = null` + `var _triggerRepaintPending = false`
+  - `_isTriggerMutation(m)`：仅当 `addedNodes`/`removedNodes` 直接含 `[data-dsh-flash-trigger]`（或其后代）时返回 true —— 位置重建必命中，忽略 trigger 内部 chip 增删避免递归。
+  - `_syncTriggerRepaint()`：读 `_activeTokenSource.getAutoRetryView()` → `_syncAutoRetryDomIndicator(view)`（重 stamp attempt 属性 + paused 时 `_placeAutoRetryRearm(true)` 重插 chip）；非绑定/stopped 时由 sync 内部自然清空，符合「未绑定即隐藏」。
+  - `_ensureTriggerRepaintObserver()`：幂等启动（`MutationObserver` observe `document.body` `{childList,subtree}`，防抖 rAF+50ms setTimeout 兜底，`typeof` guard + try/catch）；apply 时（L4693）调用。
+  - `_stopTriggerRepaintObserver()`：disconnect + 复位 pending；`dispose()`（L4922）调用。
+- [x] `node scripts/build-client.mjs` → lib/client.js（173.3kb）exit 0；src↔lib 六符号出现次数逐一相等（8/8、2/2、2/2、3/3、2/2、5/5）。
+
+### 验证结果
+- [x] `npx vitest run --pool=threads`：**98 passed (98)** —— 观察器在 node 无 `document` 下经 guard 安全跳过，未破坏模块加载。
+- [x] src / lib 两侧 `node --check` 均 exit 0。
+- ⚠️ **自动化边界**：沙箱 `sb-ctx-mon` 缺 LLM provider，headless 冒烟会卡在等待回答无法自动完成；本次改动零 server 影响（纯 client DOM），语法 + 全量测试为当前最强自动验证。**完整浏览器级验证（位置切换后 badge/chip 恢复）需 GUI**，用户应在主力 web 里重启后按需确认。
+
+### 错误（Part 3）
+| 错误 | 解决方案 |
+|------|---------|
+| `_isTriggerMutation` 初版检测 `m.target`，chip 增删（target=trigger host）误判重建 | 改为只查 added/removed 是否含 trigger 根 |
+| `requestAnimationFrame` 无 guard，受限环境卡 pending | 加 `typeof requestAnimationFrame === 'function'` guard |

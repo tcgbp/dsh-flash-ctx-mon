@@ -154,6 +154,23 @@ export function isHandoffStub(text) {
 }
 
 /**
+ * textHasQuestionMark — true when the given text contains a question mark,
+ * either half-width ("?") or full-width ("？"). An absent / empty / non-string
+ * input is false.
+ *
+ * The auto-continue runner consults this on the final assistant text of a turn
+ * (the same text `isHandoffStub` inspects): when the model's last output asks a
+ * question, we do NOT auto-send "继续" for that turn — the user is expected to
+ * answer, so we back off and wait for their input. The guard stays ARMED so a
+ * later turn/end still auto-continues normally (only the current emission is
+ * skipped).
+ */
+export function textHasQuestionMark(text) {
+  if (typeof text !== 'string' || !text) return false
+  return text.indexOf('?') !== -1 || text.indexOf('？') !== -1
+}
+
+/**
  * isSelfEcho — §5.4 echo recognition.
  *
  * An entry `{ source, text, ts }` is our own "继续" echo when ALL hold:

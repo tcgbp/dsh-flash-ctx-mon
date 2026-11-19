@@ -158,6 +158,10 @@ window.__ModuleLoader__.load({
       autoRetryArmNow: '立即补发一次（发送“继续”）',
       autoRetryDisarm: '停止自动继续',
       autoRetryHint: '自动继续已开启',
+      // Composer send-button indicator (§8b) — compact per-state labels
+      autoRetrySendArmed: '自动继续',
+      autoRetrySendScheduled: '即将自动继续',
+      autoRetrySendPaused: '已暂停',
       // Auto-continue exited (info alert with the reason)
       alertAutoRetryExited: '已退出自动继续',
       autoRetryExitedReasonBudget: '已连续自动继续达到上限，暂停等待人工输入',
@@ -263,6 +267,10 @@ window.__ModuleLoader__.load({
       autoRetryArmNow: 'Continue now (send “continue”)',
       autoRetryDisarm: 'Stop auto-continue',
       autoRetryHint: 'auto-continue active',
+      // Composer send-button indicator (§8b) — compact per-state labels
+      autoRetrySendArmed: 'auto-continue',
+      autoRetrySendScheduled: 'auto-send soon',
+      autoRetrySendPaused: 'paused',
       // Auto-continue exited (info alert with the reason)
       alertAutoRetryExited: 'Auto-continue turned off',
       autoRetryExitedReasonBudget: 'Reached the auto-continue limit — paused for your input',
@@ -1783,11 +1791,44 @@ var _PREFS_MAX_RETRIES = 8
         return base
       }
 
+      /** Live listeners + last-view replay for the composer send-status chip
+       *  (§8b). The send button lives OUTSIDE the flash trigger overlay, so the
+       *  cross-plugin stylesheet that recolours dsh-flash's own button cannot
+       *  reach it; a React slot inside `conversation.input.right` renders this
+       *  chip instead. The module-level channel decouples the component from
+       *  token-source setup timing — the same "no racing" pattern the resident
+       *  overlay store uses (§6), but as a plain pub/sub so a React component
+       *  can subscribe and re-render on every publish. Disposed with the factory. */
+      var _autoRetryViewListeners = new Set()
+      var _autoRetryViewLatest = null
+
+      /** Fan an auto-retry view out to every subscriber, keeping the last one
+       *  so a component that mounts between publishes still renders correctly. */
+      function _emitAutoRetryView(view) {
+        _autoRetryViewLatest = view
+        _autoRetryViewListeners.forEach(function (fn) {
+          try { fn(view) } catch (_) {}
+        })
+      }
+
+      /** Subscribe to auto-retry view publishes. The latest view (if any) is
+       *  replayed immediately, so the subscriber always has current state on
+       *  mount even when the source published before it subscribed. Returns an
+       *  unsubscribe function for useEffect cleanup. */
+      function _subscribeAutoRetryView(fn) {
+        _autoRetryViewListeners.add(fn)
+        if (_autoRetryViewLatest) { try { fn(_autoRetryViewLatest) } catch (_) {} }
+        return function () { _autoRetryViewListeners.delete(fn) }
+      }
+
       /** Publish the current view through the optional module-level bridge so
-       *  the overlay component re-renders without racing token-source setup. */
+       *  the overlay component re-renders without racing token-source setup,
+       *  and to the composer send-status subscribers (§8b). */
       function _publishAutoRetryView() {
+        var view = _makeAutoRetryView()
+        _emitAutoRetryView(view)
         if (_autoRetryStore && typeof _autoRetryStore.notify === 'function') {
-          try { _autoRetryStore.notify(_makeAutoRetryView()) } catch (_) {}
+          try { _autoRetryStore.notify(view) } catch (_) {}
         }
       }
 
@@ -3585,6 +3626,32 @@ var _PREFS_MAX_RETRIES = 8
         flex: 'none',
         fontSize: '11px',
       },
+      // Composer send-button indicator (§8b) — compact pill that sits right
+      // before the submit action (conversation.input.right). Colors mirror the
+      // resident flash-icon glow: green armed / orange scheduled / red paused.
+      sendAutoRetryInd: {
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: '5px',
+        height: '22px',
+        padding: '0 8px',
+        marginRight: '6px',
+        border: '0.5px solid var(--dsw-alias-border-l2, #0003)',
+        borderRadius: '999px',
+        background: 'var(--dsw-color-panel-bg, rgba(255,255,255,.05))',
+        color: 'var(--dsw-alias-label-secondary, #61666b)',
+        fontSize: '11px',
+        lineHeight: '20px',
+        whiteSpace: 'nowrap',
+        cursor: 'default',
+        userSelect: 'none',
+      },
+      sendAutoRetryDot: {
+        flex: 'none',
+        width: '8px',
+        height: '8px',
+        borderRadius: '999px',
+      },
       // Skills used in this session — detail rows in the config modal
       skillRow: {
         display: 'flex',
@@ -4474,6 +4541,79 @@ var _PREFS_MAX_RETRIES = 8
     }
 
     /**
+     * SendAutoRetryIndicator — the auto-continue ACTIVE state on the composer
+     * send button. Rendered into the host's `conversation.input.right` slot,
+     * which sits immediately before the submit action (right of the text entry,
+     * in front of the send button) — the one place the resident flash-icon glow
+     * cannot reach, because that icon lives inside the floating dock where the
+     * composer route is clipped.
+     *
+     * Visibility is structural and session-safe:
+     *   - the slot framework hands us the `sessionId` this composer belongs to;
+     *   - we read the CURRENT view fresh on every render via
+     *     `_activeTokenSource.getAutoRetryView()` (authoritative, never stale);
+     *   - we render only when `view.sessionId === props.sessionId` AND the state
+     *     is active (armed / scheduled / paused), so a stopped session shows
+     *     nothing and one composer never shows another session's state.
+     *
+     * A module-local subscription (`_subscribeAutoRetryView`) drives re-render
+     * on each publish — the same no-racing channel the overlay uses, exposed as
+     * a plain pub/sub rather than options polling.
+     */
+    function SendAutoRetryIndicator(props) {
+      var sessionId = props.sessionId
+      var _tick = useState(0)
+      var setTick = _tick[1]
+
+      useEffect(function () {
+        return _subscribeAutoRetryView(function () { setTick(function (v) { return v + 1 }) })
+      }, [])
+
+      var src = _activeTokenSource
+      var view = null
+      if (src && typeof src.getAutoRetryView === 'function') {
+        try { view = src.getAutoRetryView() || null } catch (_) { view = null }
+      }
+      if (!view || !sessionId) return null
+      if (view.sessionId !== sessionId) return null
+      var state = view.state
+      if (state !== 'armed' && state !== 'scheduled' && state !== 'paused') return null
+
+      var idx = view.attemptIndex || 0
+      var max = view.maxConsecutive || 0
+      var counter = max > 0 ? (idx + '/' + max) : null
+
+      var content = state === 'armed' ? t('autoRetrySendArmed')
+        : state === 'scheduled' ? t('autoRetrySendScheduled')
+        : t('autoRetrySendPaused')
+      var color = state === 'armed' ? 'rgba(47,158,68,1)'
+        : state === 'scheduled' ? 'rgba(232,89,12,1)'
+        : 'rgba(224,49,49,1)'
+      var isPaused = state === 'paused'
+
+      var buttonProps = {
+        type: 'button',
+        'data-dsh-flash-ctx-mon-send-ind': '1',
+        'data-state': state,
+        title: isPaused ? t('autoRetryRearmHint') : t('autoRetryHint'),
+        'aria-label': isPaused ? t('autoRetryRearmHint') : t('autoRetryHint'),
+        style: isPaused ? Object.assign({}, S.sendAutoRetryInd, { cursor: 'pointer' }) : S.sendAutoRetryInd,
+      }
+      if (isPaused) {
+        buttonProps.onClick = function (ev) {
+          ev.preventDefault(); ev.stopPropagation()
+          try { _armAutoRetry(true) } catch (_) {}
+        }
+      }
+
+      return h('button', buttonProps,
+        h('span', { style: Object.assign({}, S.sendAutoRetryDot, { background: color }) }),
+        h('span', null, content),
+        counter ? h('span', { style: { fontWeight: '700' } }, counter) : null,
+      )
+    }
+
+    /**
      * SkillsTabChip — the chip rendered into a session tab strip by
      * hostSkillsChip.
      *
@@ -4920,6 +5060,26 @@ var _PREFS_MAX_RETRIES = 8
           }, 'dsh-flash-ctx-mon: session skills chip')
         })
 
+        // 7b. Register the composer send-button auto-continue indicator into
+        //     `conversation.input.right`, the host slot that sits immediately
+        //     before the submit action. Same session-scoped contract as the
+        //     header chip: the slot framework hands the component the id of the
+        //     session the composer belongs to, and SendAutoRetryIndicator gates
+        //     on `sessionId === view.sessionId`, so the main composer never
+        //     shows a subagent's auto-continue state and vice versa. It appears
+        //     only while auto-continue is active (armed / scheduled / paused).
+        ctx.inject(['slots'], function (slotsCtx) {
+          slotsCtx.effect(function () {
+            return slotsCtx.slots.inject('conversation.input.right', function () {
+              return slotsCtx.slots.register({
+                name: 'conversation.input.right',
+                id: 'dsh-flash-ctx-mon-send-ind',
+                order: 20,
+              }, SendAutoRetryIndicator)
+            })
+          }, 'dsh-flash-ctx-mon: composer send auto-continue indicator')
+        })
+
         // Passive: listen for dsh-flash:ready event
         try {
           ctx.on('dsh-flash:ready', function (payload) {
@@ -4954,6 +5114,10 @@ var _PREFS_MAX_RETRIES = 8
         closeMonitorConfig()
         _clearAutoRetryDomIndicator()
         _autoRetryStore = null
+        // Drop the composer send-indicator pub/sub so no mounted component
+        // keeps a stale subscription and the channel stops growing.
+        _autoRetryViewListeners.clear()
+        _autoRetryViewLatest = null
         _clearUnsettledDomIndicator()
         _unsettledStore = null
         _stopTriggerRepaintObserver()

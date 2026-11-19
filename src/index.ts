@@ -187,8 +187,6 @@ export interface CtxMonConfig {
   ctxThresholdError: Volatile<number>
   ctxPollBase: Volatile<number>
   ctxPollMin: Volatile<number>
-  modelContextWindows: Volatile<Record<string, number>>
-  modelContextWindowSources: Volatile<Record<string, string>>
   // Auto-continue tunables. Volatile so users can edit through settings, but
   // read live through .get() on the client side.
   autoRetryGraceMs: Volatile<number>
@@ -209,21 +207,6 @@ export const Config = Schema.object({
   ctxThresholdError: Schema.number().default(DEFAULT_CTX_THRESHOLD_ERROR).volatile(),
   ctxPollBase: Schema.number().default(DEFAULT_CTX_POLL_BASE).volatile(),
   ctxPollMin: Schema.number().default(DEFAULT_CTX_POLL_MIN).volatile(),
-  // These MUST be volatile, even though they are durable user data rather than
-  // live scalars. The settings service only accepts edits to fields under a
-  // volatile node — `settings.write()` rejects any patched path that is not:
-  //
-  //   throw new Error(`Config field "${path.join('.')}" is not volatile`)
-  //
-  // Both fields used to be non-volatile, so every model-window mapping the
-  // panel wrote was rejected by the host, rolled back by the client, and lost —
-  // which is why a mapped model kept falling back to `ctxApproxWindow`.
-  // Volatile does NOT mean transient here: the write lands in the profile
-  // patch like every other edited field (the patch already carries the
-  // volatile `ctxApproxWindow`), so the mapping and its provenance survive a
-  // restart, which is what the priority guard in the client needs.
-  modelContextWindows: Schema.dict(Schema.number()).default({}).volatile(),
-  modelContextWindowSources: Schema.dict(Schema.string()).default({}).volatile(),
   // Auto-continue tunables — live-read via .get() on the client side.
   autoRetryGraceMs: Schema.number().default(DEFAULT_AUTO_RETRY_GRACE_MS).volatile(),
   autoRetryCooldownMs: Schema.number().default(DEFAULT_AUTO_RETRY_COOLDOWN_MS).volatile(),

@@ -30,7 +30,7 @@ A Cordis plugin named `dsh-flash-ctx-mon`.
 | Thing | Detail |
 | --- | --- |
 | Settings namespace | `dsh-flash-ctx-mon` |
-| Fields | `ctxApproxWindow`, `ctxThresholdInfo`, `ctxThresholdWarning`, `ctxThresholdError`, `ctxPollBase`, `ctxPollMin`, `modelContextWindows`, `modelContextWindowSources` |
+| Fields | `ctxApproxWindow`, `ctxThresholdInfo`, `ctxThresholdWarning`, `ctxThresholdError`, `ctxPollBase`, `ctxPollMin` |
 | Routes | **none** |
 | Host-side services | **none** (`inject: []`) |
 
@@ -99,11 +99,11 @@ one, and `_switchIcon` would render its literal text, so we use a supported name
 | Context Poll Base Interval `ctxPollBase` | 5000–60000 ms | 1000 | 20000 |
 | Context Poll Min Interval `ctxPollMin` | 1000–10000 ms | 500 | 2000 |
 
-Below the sliders the panel reports the live state — **Current Model**, **Window Size**,
-**Window Source** (Session Event / Model Catalog / Error Parsed / Manual / Built-in /
-Fuzzy Match / Fallback), **Data Source** (Precise / Awaiting data), **Input Tokens** and
-**Context Pressure** — and carries the **Model Window Map** editor, a **Refresh
-Catalog** action, and a preview of what the alert messages look like.
+The panel exposes the config sliders (context thresholds, poll intervals, fallback window
+size), the auto-retry tuning section, and a collapsible preview of the alert messages. At
+runtime the monitor also surfaces a persistent **context-window mismatch** warning alert
+whenever the live request/context window differs from the model's configured window in
+llm-pi-ai.
 
 ## Alerts
 
@@ -123,22 +123,27 @@ registry, so they appear in the panel's alert list and as toasts like any other.
 
 ## How a model's window is resolved
 
-`_resolveWindow(model)` reads `modelContextWindows` — the **user-mapped** table in the
-settings namespace — and labels each answer with its provenance from
-`modelContextWindowSources`. A model that is not in the map resolves to `null`, and the
-caller falls back to `ctxApproxWindow` (the "Fallback" source).
+The context window is **read-time authoritative and never persisted by this plugin** —
+ctx-mon holds no model-map preference of its own. Resolution runs in this order
+(`_resolveWindow` / `getTokenEstimate`):
 
-**The built-in window table has been retired.** `_KNOWN_WINDOWS` is empty and the
-catalog auto-fill is a documented no-op, so today the map is the only source of a real
-window size — which is why the panel's Model Window Map editor is how you teach it about
-a model it gets wrong.
+1. **llm-pi-ai model config** — a registered model's `contextWindow` in the
+   `@deepseek-ai/dsh-llm-pi-ai` namespace (`providers.<pid>.models[].contextWindow`) is the
+   authoritative user-configured window, labelled `CWS_USER_MAPPING` with `windowConfirmed:
+   true`.
+2. **Request/context window** — otherwise the window DSH's adapter reports on the
+   request/context event is cached and used (`CWS_REQUEST_CONTEXT`, `windowConfirmed: true`).
+3. **Fallback** — with no authoritative source, `ctxApproxWindow` supplies the estimate
+   (`CWS_APPROX_DEFAULT`, `windowConfirmed: false`), which **never** judges pressure.
 
-> Both map fields are `volatile()`, and that is **not** a statement that they are
-> transient. The settings service rejects any patched path that is not under a volatile
-> node (`Config field "…" is not volatile`), so a non-volatile `modelContextWindows`
-> meant every mapping the panel wrote was rejected, rolled back and lost — a mapped
-> model kept falling back to `ctxApproxWindow`. Volatile is what makes the write legal;
-> the value still lands in the profile patch and survives a restart.
+**The old Model Window Map editor and the `modelContextWindows` / `modelContextWindowSources`
+durable mapping fields have been removed.** There is no user-facing mapping table anymore;
+to correct a window, edit the model's `contextWindow` in the `dsh-llm-pi-ai` configuration.
+
+**Explicit mismatch alert** — when the adapter's request/context window disagrees with a
+user-configured llm-pi-ai window for the same model, the panel shows a dedicated alert
+explaining the discrepancy instead of silently picking one, so a wrong assumption is never
+hidden.
 
 ## Polling
 
@@ -209,6 +214,13 @@ it, and your **manual stop** still disarms it. An **unarmed** session that settl
 unarmed (it is never armed passively) — the type-a-continue-word entry point remains for when you
 want it.
 
+**When the model's last output asks a question, auto-continue waits for your answer.** If the final
+assistant text of a turn contains a question mark (`?` or `？`), the model is clearly expecting your
+reply — so the runner skips the automatic "继续" for **this turn only** and waits for your input,
+instead of queuing a "continue" in front of your answer. The guard **stays armed**; once you reply
+and the next `turn/end` fires, auto-continue resumes under the normal rules. This does not consume
+the consecutive budget and raises no exit alert.
+
 It is **fully turned off** when:
 
 1. **Manual stop** — you press "Stop auto-continue".
@@ -248,14 +260,12 @@ exactly as before.
 
 | Field | Default | Notes |
 | --- | --- | --- |
-| `ctxApproxWindow` | 128000 | Fallback window for a model the map does not know |
+| `ctxApproxWindow` | 128000 | Fallback window when no authoritative (llm-pi-ai / request-context) source is present; never judges pressure |
 | `ctxThresholdInfo` | 70 | % of the window |
 | `ctxThresholdWarning` | 85 | % — must exceed the info threshold |
 | `ctxThresholdError` | 95 | % — must exceed the warning threshold |
 | `ctxPollBase` | 20000 | ms, the low-usage ceiling |
 | `ctxPollMin` | 2000 | ms, the floor |
-| `modelContextWindows` | `{}` | model id → window size |
-| `modelContextWindowSources` | `{}` | model id → provenance tag |
 | `autoRetryGraceMs` | 5000 | how long after an abnormal turn/end to wait before auto-sending "continue" (suggest 3–8 s) |
 | `autoRetryCooldownMs` | 20000 | minimum spacing between two auto-continues in the same session (cap); prevents burning tokens |
 | `autoRetryMaxConsecutive` | 4 | pause and wait for the user once this many consecutive auto-continues still did not finish |

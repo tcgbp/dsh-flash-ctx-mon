@@ -144,18 +144,22 @@ autoRetryEl → alertPreviewEl → ctxLiveDataEl`。
   `shouldAutoContinue` / `consumeContinuation` / `isSelfEcho` / `retryAttemptKey` /
   `requestIdForAttempt`。核心判定：`backoffDelayMs = min(graceMs*2^level, maxBackoffMs)`（level 上限 20）。
 
-### 4.4 窗口解析与持久化
+### 4.4 窗口解析（读时权威、不持久化）
 
-- `_resolveWindow` 读时解析优先级链（L835-860 核实）：
-  1. llm-pi-ai 模型配置（`_llmPiAiState.providers[].models[].contextWindow`）→ `CWS_USER_MAPPING`、
-     `windowConfirmed = true`（L839-846）；
-  2. 传统用户映射 `modelContextWindows`（来源按 `modelContextWindowSources` provenance 标记，
-     L849-857）→ `windowConfirmed = true`；
-  3. 缓存 `_contextWindow` + `CWS_REQUEST_CONTEXT`（请求 header 解析，仅当 `_contextWindowModel` 匹配当前
-     `_model`，L1627-1630）→ `windowConfirmed = true`；
-  4. 兜底 `ctxApproxWindow` + `CWS_APPROX_DEFAULT` → `windowConfirmed = false`（**绝不据此判压力**，L1635-1637）。
-- `_persistWindow(opts)`（L1216-1244）：`opts.clobber` 仅显式传 `'always'` 时才允许覆盖**异源**已有记录
-  （L1230）；来源为 `CWS_USER_MAPPING` 的条目永不覆盖（user intent > auto-detected，L1226）。
+- `_resolveWindow` 读时解析优先级链（L637-652）：
+  1. **llm-pi-ai 模型配置**（持久化于 DSH profile 的 `dsh-llm-pi-ai` 命名空间：
+     `providers[].models[].contextWindow`）→ `CWS_USER_MAPPING`、`windowConfirmed = true`；
+     单个 provider 模型不在表内时返回 `{window:null, source:CWS_APPROX_DEFAULT}`。
+- `getTokenEstimate()` 读时合并（L2224-2241）：
+  1. `_resolveWindow` 有 `window != null` → 采用（`CWS_USER_MAPPING`，`windowConfirmed = true`）；
+  2. 否则命中缓存的请求/上下文窗口（`_contextWindow` 且 `_contextWindowModel === _model`）→
+     `CWS_REQUEST_CONTEXT`、`windowConfirmed = true`（请求 header 解析，L1834-1877）；
+  3. 均无权威来源 → 兜底 `ctxApproxWindow` + `CWS_APPROX_DEFAULT` → `windowConfirmed = false`
+     （**绝不据此判压力**）。
+- **不持久化**：`modelContextWindows` / `modelContextWindowSources` 这两个持久化偏好早已移除；
+  窗口只来自上述读时解析，plugin 从不把窗口写回 profile。
+- **窗口不一致告警**：当事件层解析出的请求/上下文窗口与权威用户映射（llm-pi-ai 模型配置）不一致时记 `_windowMismatch`
+  并在面板告警区显式提示（L2833-2863），提醒用户核对模型配置，绝不静默采用。
 
 ---
 
@@ -183,11 +187,11 @@ autoRetryEl → alertPreviewEl → ctxLiveDataEl`。
 | `autoRetryMaxBackoffMs` (300000) | 退避上限 |
 | `autoRetryContinueText` (`'继续'`) | 补发文案（连同请求 ID 用于识别自身回显） |
 | `autoRetryEchoWindowMs` (30000) | 回显识别窗口 |
-| `ctxApproxWindow` | 近似窗口兜底 |
-| `modelContextWindows` / `modelContextWindowSources` | 用户映射与来源记录 |
+| `ctxApproxWindow` | 近似窗口兜底（`windowConfirmed=false`，绝不据此判压力） |
 | `monitor-context` toggle（`dsh-flash-ctx-mon:monitor-context`） | 监控芯片开关（L4070） |
 
-每个偏好在浮层组件内**读时实时解析**（`_alertPref(key)`），不缓存陈旧值；用户编辑映射立即生效。
+每个偏好（含 `ctxApproxWindow` 及 auto-retry 标量）在浮层组件内**读时实时解析**（`_alertPref(key)`），不缓存陈旧值；
+窗口本身不存储在偏好里，只来自 4.4 的读时权威解析。
 
 ---
 

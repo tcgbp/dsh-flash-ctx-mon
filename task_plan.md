@@ -216,3 +216,65 @@ paused/stopped 一律禁用 → 一旦暂停无路可回。
 - [ ] 三门口令通过（本轮已跑：`tsc --noEmit` exit 0、`vitest --pool=threads` 94/94、build exit 0）；
       GUI 浏览器验证：预算烧尽挂起的会话拨「自动继续」开关（或点「立即武装」）→ 红色 paused 回到绿色
       待命并继续自动补发；未武装/已武装正常会话行为不变。
+
+## 后续任务：模型最后一段输出是疑问句时，自动继续跳过本次补发、等待用户回答
+
+**背景**：探索审计 `dsh-flash-ctx-mon` 的 auto-retry / auto-continue 行为时，用户提出期望 ——
+**当模型的最后一段文本包含问号（`?` 或 `？`）时，跳过本次的自动发送「继续」，等待用户回答**（模型在提问、
+期待回答，不应让自动补发的「继续」抢在回答之前发出）。
+
+**经 `ask_user_question` 确认方案（推荐）**：**仅跳过本次补发，守卫保持待命** —— 不停止整个会话的自动继续、
+也不改为 paused；主自动继续偏好不变；下一次回合结束仍按正常规则评估。判定输入用 `_lastAssistantText`
+（最近一条完整助手消息文本 = 模型最终输出，与 `isHandoffStub` 检查的是同一段文本）；判定函数为新纯函数
+`textHasQuestionMark(text)`（「包含问号」而非 endsWith，半角/全角均算，空/非字符串为 false）。
+
+**已完成**
+- [x] `src-client/auto-retry.js`：新增导出 `textHasQuestionMark(text)`（`isHandoffStub` 与 `isSelfEcho` 之间，
+      `export function` 风格 + JSDoc 说明自动继续 runner 据此在最终助手文本含问号时不为该回合自动发「继续」、
+      守卫保持 armed，后续回合照常评估）。
+- [x] `src-client/factory-body.js`：import 块补入 `textHasQuestionMark`；`_handleTurnEnd` 在 `_armAutoRetry()` /
+      `_activeAutoRetryRecord()` / `remaining<=0` 之后、`_scheduleAutoRetryEmit()` 之前拦截
+      `if (mustWaitForAnswer) { _publishAutoRetryView(); return }` —— 可重试结束与已武装正常完成在公共调度点
+      统一跳过本次补发、守卫保持 armed、不消耗预算、不弹退出告警；回放路径（`!replay` 守卫）不受影响。
+- [x] `test/auto-retry.test.js`：新增 `describe('textHasQuestionMark', …)` 四组用例（半角 `?` / 全角 `？` /
+      空与非字符串输入 / 无问号文本）。
+- [x] `node scripts/build-client.mjs`（191.8kb）exit 0：bundle 含 `textHasQuestionMark`（L210）与
+      `mustWaitForAnswer`（L1551、L1569）。
+- [x] `npx vitest run test/auto-retry.test.js`：**44/44** 通过。
+- [x] 同步 CHANGELOG（Unreleased）/ README×2（自动继续章节新增「模型提问时停下来等回答」段）/
+      docs design（§5 新增护栏第 9 条）/ progress / 本文件；不改用户 ` M` 文件。
+
+**待办**
+- [ ]（如需要）GUI 浏览器验证：武装会话跑一个以问号结尾的回合 → 本回合不再自动发「继续」、守卫仍待命绿；
+      用户回答后再触发下一个可判定回合仍按常规自动继续。
+- [x] 全量 `npx vitest run --pool=threads`：**98/98**（94 基础 + 4 新增 auto-retry 用例）。
+
+---
+
+## 后续任务：修复 flash 图标触发位置改变导致自动继续计数消失（Part 3，2026-11-19）
+
+**用户反馈**："flash 图标触发位置改变会让自动继续计数完全消失"。
+
+**根因（已定位）**：dsh-flash 在改变触发位置时走 `applyTrigger(v)` → `unmountOverlayTrigger()`（移除旧 trigger button）+ `mountOverlayTrigger()`（`document.createElement('button')` 新建再 `body.appendChild`，lib/client.js L9749-9777 / L10825+/L10954）。ctx-mon 通过 css `::after` 依赖 stamp 在 trigger 节点上的 `data-ctx-mon-autoretry-attempt` 属性，paused 态 rearm chip 是 append 到该节点的 `span[data-ctx-mon-rearm]`（src 850-877 / `_placeAutoRetryRearm`）。节点重建 → 属性与 chip 一并销毁；`_syncAutoRetryDomIndicator` 只在 view publish（L4505）时重 stamp，位置切换不产生 publish → 计数角标与 rearm chip 一起消失。
+
+**修复方案**：在 ctx-mon（scope-1，`_syncAutoRetryDomIndicator` 同区域）加一个 MutationObserver `_triggerRepaintObserver`，监听 `document.body` childList subtree；回调仅在检测到 `[data-dsh-flash-trigger]` 相关节点增删（重建）时，(防抖后) 重新调用 `_syncAutoRetryDomIndicator(_activeTokenSource.getAutoRetryView())` 恢复属性与 chip。提供模块级 `_ensureTriggerRepaintObserver()`（幂等启动，apply 时调用）与 `_stopTriggerRepaintObserver()`（dispose 时断连），供 scope-2 引用。
+
+### 阶段 A：根因确认
+- [x] 通读 dsh-flash `applyTrigger`/`mountOverlayTrigger`/`unmountOverlayTrigger`，确认位置切换重建 trigger DOM 节点。
+- [x] 确认 ctx-mon `_syncAutoRetryDomIndicator` 仅在 publish 时重 stamp，重建不触发 publish。
+
+### 阶段 B：实现（src 与 lib 双写）
+- [x] src-client/factory-body.js：加 `_triggerRepaintObserver` + `_syncTriggerRepaint()` + `_ensureTriggerRepaintObserver()` + `_stopTriggerRepaintObserver()`（scope-1，`_syncAutoRetryDomIndicator` 附近，L998-1052）；apply 时（L4693）调 `_ensureTriggerRepaintObserver()`；`dispose()`（L4922）调 `_stopTriggerRepaintObserver()`。
+- [x] `node scripts/build-client.mjs` 重建 lib/client.js（173.3kb）exit 0；src↔lib 六符号计数逐一相等。
+- [x] 两侧 `node --check` 均 exit 0。
+
+### 阶段 C：验证
+- [x] `npx vitest run --pool=threads`：**98/98** 通过（观察器在 node 无 `document` 下经 guard 安全跳过，未破坏模块加载）。
+- [x] 复查 grep：`_triggerRepaintObserver`/`_ensureTriggerRepaintObserver`/`_stopTriggerRepaintObserver`/`_syncTriggerRepaint`/`_isTriggerMutation`/`_triggerRepaintPending` 在 src 与 lib 出现次数全部一致（8/8、2/2、2/2、3/3、2/2、5/5）。
+- [ ] 说明：沙箱 `sb-ctx-mon` 缺 provider 依赖，headless 冒烟会卡在等待 LLM，无法自动完成；server 侧改动为零（观察器纯 client DOM 层），语法 + 全量测试已是最强自动验证。完整浏览器级验证（位置切换后 badge/chip 恢复）需 GUI，由用户在主力 web 里重启后确认。
+
+## 遇到的错误（Part 3 追加）
+| 错误 | 尝试次数 | 解决方案 |
+|------|---------|---------|
+| 首次实现 `_isTriggerMutation` 顺带检测 `m.target` → chip 增删（target 为 trigger host）会误判为重建，虽收敛但多一帧浪费 | 1 | 修订为只检查 `addedNodes`/`removedNodes` 是否含 trigger 根（位置重建 remove+add 必命中），忽略内部 chip 变化 |
+| `requestAnimationFrame(_syncTriggerRepaint)` 无 guard，non-browser/受限 webview 下若 undefined 会卡住 pending 标志 | 1 | 加 `typeof requestAnimationFrame === 'function'` guard，与项目 typeof+try/catch 风格一致 |

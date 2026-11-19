@@ -126,6 +126,13 @@
    `client/sessions/session.d.ts` L144）；自动继续恒用 **`"queue"`**（追加），避免 steer 的插队/编辑语义。
 8. **幂等重发**（新增，实证见 §8.4）：自动继续发送**稳定 `requestId`**（per-session + attempt token，客户端自签）；
    host 对已进入 queue/日志的 `requestId` 直接返回原接受结果、不重复插入（README L34）——网络重发天然去重。
+9. **疑问句结尾 → 跳过一次自动补发，等待用户回答**（新增）：当某回合模型**最后一段文字**（`_lastAssistantText`，
+   与 §4 中 `isHandoffStub` 检查的是同一段文本）含问号（`?` 或 `？`）时，本回合**不自动发送「继续」**——模型是在
+   向用户提问、期待其回答，应先停下来让用户反馈，避免自动补发的「继续」抢在回答之前发出。判定用纯函数
+   `textHasQuestionMark(text)`（仅半角/全角问号，空/非字符串为 false）。语义：这次**只跳过本次补发**，
+   **守卫保持 armed 待命**——用户回答进入新一轮回合后，回合结束再按常规规则判断是否自动继续；
+   预算/退避/排程等在 `_handleTurnEnd` 公共调度点被统一抑制，因此可重试结束（error/interrupted/max-tokens）
+   与已武装会话的 normal 完成都在同一点生效，不消耗连续预算、不触发退出告警。
 
 ---
 
@@ -134,7 +141,7 @@
 | 半 | 文件 | 改动 |
 | --- | --- | --- |
 | 宿主 | `src/index.ts` | `dsh-flash-ctx-mon` 命名空间新增一组 `volatile()` 字段：`autoRetryGraceMs`(5000)、`autoRetryCooldownMs`(20000)、`autoRetryMaxConsecutive`(4)、`autoRetryMaxBackoffMs`(300000)、`autoRetryContinueText`("继续")、`autoRetryEchoWindowMs`(30000)。**不写进核心 `dsh-flash` 命名空间。** |
-| 浏览器 | `src-client/factory-body.js` | ① `SessionEventTokenSource._processEntries`：`turn/end` 的 reason 判定从仅 `error` 扩到 `{error, interrupted, max-tokens}`，把终止原因交给 AutoRetry 状态机；② 新增 `AutoRetryRunner`（会话级去重/宽限/退避/上限/回显/人工退出/**固定 `queue` 模式/稳定 `requestId` 幂等**，有状态逻辑**内联**在 `factory-body.js`）；③ 新增常驻独立弹窗（含「自动继续」「停止」＋状态行）；④ **落地面 L17**：`sessions.binding(id).eventSource` 只绑定当前 GUI 会话，随当前绑定/`Session` 对象替换（重连、重命名）跟随，prompt 恒发往当前绑定 id；⑤ **L16 空目录**：模型上下文窗口表消费 `remote.session.modelCatalog()` 时处理空 `_modelCatalog.groups`，回退 `ctxApproxWindow`。 |
+| 浏览器 | `src-client/factory-body.js` | ① `SessionEventTokenSource._processEntries`：`turn/end` 的 reason 判定从仅 `error` 扩到 `{error, interrupted, max-tokens}`，把终止原因交给 AutoRetry 状态机；② 新增 `AutoRetryRunner`（会话级去重/宽限/退避/上限/回显/人工退出/**固定 `queue` 模式/稳定 `requestId` 幂等**，有状态逻辑**内联**在 `factory-body.js`）；③ 新增常驻独立弹窗（含「自动继续」「停止」＋状态行）；④ **落地面 L17**：`sessions.binding(id).eventSource` 只绑定当前 GUI 会话，随当前绑定/`Session` 对象替换（重连、重命名）跟随，prompt 恒发往当前绑定 id；⑤ **L16 模型发现已去耦**：旧「模型上下文窗口表」已移除——窗口改为读时从 llm-pi-ai 模型配置 / request-context 事件解析，不再消费 `remote.session.modelCatalog()` 维护窗口表，故不再受空目录影响。 |
 | 设置 | 「配置」面板 | 加一组 Auto-Retry 输入/滑块（沿用现有 slider 风格）。 |
 | 测试 | `test/` | Runner 的判定/退避/上限/回显识别（含 `rpcId` 精确匹配与稳定 `requestId` 幂等）抽成**纯函数**放可测模块，用现成 Vitest 单测覆盖。 |
 | 构建 | 脚本 | 宿主半 `pnpm run build`（tsc→dist）＋ 浏览器半 `build:client`（esbuild→lib/client.js）；`dist/` 与 `lib/` 按惯例**提交**；改完刷新 Web 页面验证。 |
@@ -206,7 +213,7 @@ signature 注释、缺字段体；作者复核已裁决「补丁后缀的语义�
 | L13 python-optional-resources | **N/A** | 无 Python 运行时/资源 |
 | **L14 plugin-option-placement** | **直接相关** | 冒烟安装必须用 `dsh plugin --profile <name> add <package>`；旧写法 `… add <pkg> --profile <name>` 自 0.2.1-alpha.2 起已失败 |
 | L15 terminal-command-labels | **N/A** | 浏览器客户端非 terminal UI；无 `TerminalBlockLabels` |
-| **L16 deepseek-model-discovery** | **直接相关** | ctx-mon 模型上下文窗口表消费 `remote.session.modelCatalog()`；deepseek-official 在无 key 时返回**空目录**（无 key）→ 消费者必须处理空 `_modelCatalog.groups`，ctx-mon 已有 `ctxApproxWindow` 回退；需配置 key 或 `apiKeyEnv`（默认 `DEEPSEEK_API_KEY`）。**自动继续本体不依赖 modelCatalog**——只依赖 `turn/end` 事件与 `session.prompt` RPC，二者已在 0.2.1-rc.5 实证存在 |
+| **L16 deepseek-model-discovery** | **直接相关** | ctx-mon 旧「模型上下文窗口表」已移除——窗口改为读时从 llm-pi-ai 模型配置 / request-context 事件解析，不再消费 `remote.session.modelCatalog()` 维护窗口表，故不再需要空目录回退；模型列表若展示仍可经 `modelCatalog()`，需配置 key 或 `apiKeyEnv`（默认 `DEEPSEEK_API_KEY`）。**自动继续本体不依赖 modelCatalog**——只依赖 `turn/end` 事件与 `session.prompt` RPC，二者已在 0.2.1-rc.5 实证存在 |
 | **L17 new-session-generations** | **直接相关** | 新会话现在同时建新 Agent、不再复用空会话；预置变更前的旧会话不自动跟随 → 自动继续必须作用在**当前 GUI 绑定的 Session** 上（`sessions.binding(id).eventSource`），且 `Session` 对象被替换（重连/重命名）后 `onEngaged` 仍发布 → 与设计 §3「按 sessionId 隔离 + 只对当前会话」自洽 |
 | L18 mock-messages-events | **N/A** | 无 mock/llm-mock-server |
 | L19 desktop-test-auth-popup | **N/A** | 浏览器 Web GUI；仅走 Desktop 测试构建时才需 `updates.allowTestAuthPopupWindow: true` + 完全重启 |

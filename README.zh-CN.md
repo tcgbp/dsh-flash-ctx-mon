@@ -27,7 +27,7 @@ Apache-2.0
 | 项目 | 说明 |
 | --- | --- |
 | 设置命名空间 | `dsh-flash-ctx-mon` |
-| 字段 | `ctxApproxWindow`、`ctxThresholdInfo`、`ctxThresholdWarning`、`ctxThresholdError`、`ctxPollBase`、`ctxPollMin`、`modelContextWindows`、`modelContextWindowSources` |
+| 字段 | `ctxApproxWindow`、`ctxThresholdInfo`、`ctxThresholdWarning`、`ctxThresholdError`、`ctxPollBase`、`ctxPollMin` |
 | 路由 | **无** |
 | 宿主侧服务 | **无**（`inject: []`） |
 
@@ -84,10 +84,9 @@ Apache-2.0
 | 上下文轮询基础间隔 `ctxPollBase` | 5000–60000 ms | 1000 | 20000 |
 | 上下文轮询最小间隔 `ctxPollMin` | 1000–10000 ms | 500 | 2000 |
 
-滑块下方是实时状态：**当前模型**、**窗口大小**、**窗口来源**（会话事件 / 模型目录 / 错误
-解析 / 手动配置 / 内置表 / 模糊匹配 / 估算默认）、**数据来源**（精确 / 等待数据）、
-**输入Token** 与 **上下文压力**；此外还有**模型窗口映射**编辑器、**刷新目录**动作，以及
-告警消息样式的预览。
+面板提供配置滑块（上下文阈值、轮询间隔、兜底窗口大小）、自动继续调节区块，以及可折叠的告警消息
+样式预览。窗口只读时解析、绝不持久化，也没有独立的「数据来源」折叠区或内存条。当适配器的
+请求/上下文窗口与 llm-pi-ai 用户配置窗口不一致时，面板会显式弹出一条**窗口不一致告警**解释差异。
 
 ## 告警
 
@@ -106,19 +105,23 @@ Apache-2.0
 
 ## 模型窗口是怎么解析出来的
 
-`_resolveWindow(model)` 读取 `modelContextWindows` —— 设置命名空间里那张**用户映射**表 —— 并
-用 `modelContextWindowSources` 给每个结果标上来源。表里没有的模型解析结果为 `null`，调用方
-回退到 `ctxApproxWindow`（即「估算默认」来源）。
+上下文窗口是**读时权威、且本插件绝不持久化**的 —— ctx-mon 本身不持有任何模型映射偏好。解析按
+如下顺序进行（`_resolveWindow` / `getTokenEstimate`）：
 
-**内置窗口表已经退役。** `_KNOWN_WINDOWS` 为空，目录自动填充是一个有文档说明的空实现，所以
-今天映射表是真实窗口大小的唯一来源 —— 这也正是「模型窗口映射」编辑器存在的意义：教会它某个
-它算错的模型。
+1. **llm-pi-ai 模型配置** —— 已注册模型在 `@deepseek-ai/dsh-llm-pi-ai` 命名空间里的
+   `contextWindow`（`providers.<pid>.models[].contextWindow`）是权威的用户配置窗口，标记为
+   `CWS_USER_MAPPING`，`windowConfirmed: true`。
+2. **请求/上下文窗口** —— 否则采用 DSH 适配器在 request/context 事件上报告的窗口并缓存
+   （`CWS_REQUEST_CONTEXT`，`windowConfirmed: true`）。
+3. **估算默认** —— 都没有权威来源时用 `ctxApproxWindow` 兜底（`CWS_APPROX_DEFAULT`，
+   `windowConfirmed: false`），它**绝不**被用来判压力。
 
-> 两个映射字段都是 `volatile()`，而这不代表它们是**临时**的。设置服务会拒绝任何不在 volatile
-> 节点下的写入路径（`Config field "…" is not volatile`），所以 `modelContextWindows` 曾经因为
-> 不是 volatile，导致面板写下的每一条映射都被宿主拒绝、被客户端回滚、然后丢失 —— 被映射过的
-> 模型依旧回退到 `ctxApproxWindow`。volatile 是让写入合法的前提；值本身照旧落在 profile patch
-> 里，重启后仍在。
+**旧的「模型窗口映射」编辑器以及 `modelContextWindows` / `modelContextWindowSources` 这两个持久化
+映射字段已经移除。** 不再有面向用户的映射表；要修正窗口，请直接编辑 `dsh-llm-pi-ai` 配置里该
+模型的 `contextWindow`。
+
+**显式不一致告警** —— 当适配器的请求/上下文窗口与同一模型的 llm-pi-ai 用户配置窗口不一致时，面板
+会弹出一条专门的告警解释差异，而不是静默取其一 —— 错误的假设永远不会被悄悄掩盖。
 
 ## 轮询
 
@@ -160,6 +163,8 @@ Apache-2.0
 
 **回合正常收尾也不再解除守卫**：`turn/end` 既不属于 `error` / `interrupted` / `max-tokens`，最后一条助手输出也不以「让我 / 让我来 / let me」开头（即不是交接桩）时——既然回合已自行跑完，就无需再补发，守卫**保持武装、继续待命**；只有当你**主动**按下停止才会彻底关闭。**未武装**的会话正常收尾则维持未武装（不会被被动武装）——继续词的入口仍然只在你想开的时候手动打开。
 
+**模型最后一段输出是在提问时，自动继续会停下来等你的回答**：当某回合最后一条助手文字含问号（`?` 或 `？`）时，模型显然在等你的回复——于是本回合**只跳过这一次**自动补发「继续」，停下来等你的输入，而不会把「继续」抢在你的回答之前排进去。守卫**保持武装**；等你回答、下一次 `turn/end` 触发时，自动继续会按常规规则恢复正常。这不会消耗连续预算，也不会弹出退出告警。
+
 会**彻底关闭**的情况：
 
 1. **面板手动停止** —— 点「停止自动继续」。
@@ -178,14 +183,12 @@ Apache-2.0
 
 | 字段 | 默认 | 说明 |
 | --- | --- | --- |
-| `ctxApproxWindow` | 128000 | 映射表不认识的模型所用的回退窗口 |
+| `ctxApproxWindow` | 128000 | 无权威来源（llm-pi-ai / 请求-上下文）时的回退窗口，绝不据此判压力 |
 | `ctxThresholdInfo` | 70 | 占窗口百分比 |
 | `ctxThresholdWarning` | 85 | % —— 必须大于信息阈值 |
 | `ctxThresholdError` | 95 | % —— 必须大于警告阈值 |
 | `ctxPollBase` | 20000 | ms，占比低时的天花板 |
 | `ctxPollMin` | 2000 | ms，地板 |
-| `modelContextWindows` | `{}` | 模型 id → 窗口大小 |
-| `modelContextWindowSources` | `{}` | 模型 id → 来源标记 |
 | `autoRetryGraceMs` | 5000 | 回合异常结束后等多久才自动补发「继续」（建议 3–8 秒） |
 | `autoRetryCooldownMs` | 20000 | 同一会话两次自动补发的最大频率（间隔上限），防连发烧钱 |
 | `autoRetryMaxConsecutive` | 4 | 连续补达此次数仍未完成即暂停，等人工介入 |

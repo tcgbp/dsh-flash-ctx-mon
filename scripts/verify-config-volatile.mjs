@@ -60,28 +60,25 @@ const fields = schema.dict || {}
 console.log('  schema type:', schema.type)
 console.log('  fields:', Object.keys(fields).join(', '))
 
-// THE FIX: both durable mapping fields must be writable through settings.update
+// ── Context-window persistence refactor ──────────────────────────────────
+// modelContextWindows / modelContextWindowSources were durable mapping prefs
+// whose provenance lived in the profile patch. They are now REMOVED: the
+// request/context window resolved by DSH's adapter is authoritative and is
+// never persisted by this plugin, so these keys must not exist in the schema.
 for (const key of ['modelContextWindows', 'modelContextWindowSources']) {
-  check(`${key} is declared`, !!fields[key], true)
-  check(`${key} carries meta.volatile`, !!(fields[key] && fields[key].meta && fields[key].meta.volatile), true)
-  check(`${key} is accepted by settings.write()`, isVolatilePath(schema, [key]), true)
+  check(`${key} is removed from the schema`, fields[key] === undefined, true)
+  check(`${key} is not writable`, isVolatilePath(schema, [key]) === false, true)
 }
-// the scalars keep working
+// the tuning scalars keep working (live-read via .get() on the client side)
 for (const key of ['ctxApproxWindow', 'ctxThresholdInfo', 'ctxPollBase', 'ctxPollMin']) {
   check(`${key} is still accepted`, isVolatilePath(schema, [key]), true)
 }
 // write() throws "has no volatile fields" when the form is empty
 const form = volatileForm(schema)
 check('the namespace still exposes a volatile form', !!(form && form.dict && Object.keys(form.dict).length > 0), true)
-// the volatile form must actually include the mapping fields, or write() drops them
-check('the volatile form includes both mapping fields',
-  ['modelContextWindows', 'modelContextWindowSources'].map((k) => !!(form.dict && form.dict[k])), [true, true])
-
-// Regression guard: the old schema marked these non-volatile, and that is
-// precisely why every mapping write was rejected and rolled back.
-check('the mapping fields are no longer ordinary config',
-  ['modelContextWindows', 'modelContextWindowSources'].map((k) => !!(fields[k] && fields[k].meta && fields[k].meta.volatile)),
-  [true, true])
+// the volatile form must still carry the writable tuning fields
+check('the volatile form includes ctxApproxWindow / ctxPollBase',
+  ['ctxApproxWindow', 'ctxPollBase'].map((k) => !!(form.dict && form.dict[k])), [true, true])
 
 // ── Auto-continue tunables must be writable + live-readable ─────────────
 const AUTO_RETRY_SCALARS = ['autoRetryGraceMs', 'autoRetryCooldownMs', 'autoRetryMaxConsecutive', 'autoRetryMaxBackoffMs', 'autoRetryEchoWindowMs']

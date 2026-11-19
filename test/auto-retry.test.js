@@ -12,6 +12,7 @@ import {
   consumeContinuation,
   isSelfEcho,
   isHandoffStub,
+  textHasQuestionMark,
   retryAttemptKey,
   requestIdForAttempt,
   isPersistenceArmed,
@@ -290,6 +291,35 @@ describe('isHandoffStub', () => {
     // A handoff stub is only counted when the phrase is at the very start.
     expect(isHandoffStub('好的，让我来')).toBe(false)
     expect(isHandoffStub('让我来，我来处理')).toBe(true)
+  })
+})
+
+describe('textHasQuestionMark', () => {
+  it('detects a half-width "?" anywhere in the text', () => {
+    expect(textHasQuestionMark('你希望我怎么做?')).toBe(true)
+    expect(textHasQuestionMark('要继续吗?')).toBe(true)
+    expect(textHasQuestionMark('第一步完成。是否继续?')).toBe(true)
+  })
+
+  it('detects a full-width "？" anywhere in the text', () => {
+    expect(textHasQuestionMark('接下来你想让我做什么？')).toBe(true)
+    expect(textHasQuestionMark('这样可以吗？')).toBe(true)
+    expect(textHasQuestionMark('分析完成，是否保存？')).toBe(true)
+  })
+
+  it('is false on an empty/absent/non-string input', () => {
+    expect(textHasQuestionMark('')).toBe(false)
+    expect(textHasQuestionMark('   ')).toBe(false)
+    expect(textHasQuestionMark(null)).toBe(false)
+    expect(textHasQuestionMark(undefined)).toBe(false)
+    expect(textHasQuestionMark(42)).toBe(false)
+    expect(textHasQuestionMark({ text: '?' }), 'object, not a string').toBe(false)
+  })
+
+  it('is false when no question mark is present', () => {
+    expect(textHasQuestionMark('已完成所有任务。')).toBe(false)
+    expect(textHasQuestionMark('done')).toBe(false)
+    expect(textHasQuestionMark('让我来处理这个错误。')).toBe(false)
   })
 })
 

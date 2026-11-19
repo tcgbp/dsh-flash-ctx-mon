@@ -13,6 +13,43 @@ hold the settings namespace and schema.
 
 ## Unreleased
 
+**The context window is resolved read-time and the Model Window Map editor is
+removed.** The panel no longer keeps a user-editable model→window map, and the
+two durable mapping fields (`modelContextWindows` /
+`modelContextWindowSources`) are gone from the host schema. A model's window is
+now resolved per-read in this order: the registered `dsh-llm-pi-ai` model
+config's `contextWindow` (authoritative, `CWS_USER_MAPPING`) → the
+request/context window DSH's adapter reports (cached, `CWS_REQUEST_CONTEXT`) →
+`ctxApproxWindow` as a never-pressure-judging fallback
+(`CWS_APPROX_DEFAULT`). Because bad assumptions no longer get silently papered
+over, the panel surfaces an explicit **window-mismatch alert** whenever the
+adapter's request/context window disagrees with the same model's user-configured
+window in llm-pi-ai. The data-source readout, the memory bar, the **Refresh
+Catalog** action, and the now-unused `sourceLabelKey` import are dropped; window
+resolution code keeps only the sources it actually uses, and the `tokens.js`
+source-tag machinery remains exported only because the retired-map regression
+test still documents it.
+
+**A question-ending model output no longer triggers an automatic "继续".** When a
+turn's final assistant text contains a question mark (`?` or `？`), the model is
+clearly asking for the user's answer, so the auto-continue runner backs off for
+that turn and waits for the user to reply instead of queuing "继续" in front of
+their answer. The guard **stays armed** — only that one emission is skipped, and
+after the user answers a later `turn/end` resumes auto-continue under the normal
+rules. Reading lives in the pure helper `textHasQuestionMark(text)` and is
+applied at the common dispatch point in `_handleTurnEnd`, so both retryable ends
+and already-armed normal completions respect it without spending budget or
+raising an exit alert. Unit-tested in `test/auto-retry.test.js`.
+
+**The resident flash icon keeps dsh-flash's own color and outline while
+auto-continue is active.** We no longer repaint the bolt's body per state
+(`color: … !important`), so the translucent outline around the bolt itself
+stops changing color during auto-continue. The surrounding animated glow ring
+(green/armed, orange/scheduled, red/paused) and the numeric attempt badge are
+kept, so the state still reads at a glance. The attempt badge's font was also
+bumped from `9px` to `10px` so the `x/y` readout is the same size as
+dsh-flash's alert count pill.
+
 ## 0.2.3
 
 **A host-rejected auto-continue now stands the guard down with a visible toast.**
