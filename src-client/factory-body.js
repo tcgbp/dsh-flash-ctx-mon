@@ -8,11 +8,11 @@
 // - Context enable toggle → dsh-flash-ctx-mon:monitor-context
 // - MONITOR_SLIDER_FIELDS.context (6 sliders)
 // - MonitorConfigModal (context-only branch)
-// - ModelWindowMapEditor component
 // - _ctxPrefs preference system
 //
 // No HTTP routes — entirely client-side. Reads token usage from DSH session
-// events via ctx.get('sessions') and model catalog from remote.session.modelCatalog().
+// events via ctx.get('sessions'); a model's context window is resolved read-time
+// from the llm-pi-ai model config or the request/context event, never persisted.
 //
 // Provider id: dsh-flash-ctx-mon:context-alert
 // Toggle key: dsh-flash-ctx-mon:monitor-context
@@ -29,20 +29,11 @@ import {
   formatTokenK,
   formatTokenK1,
   CWS_REQUEST_CONTEXT,
-  CWS_CATALOG_AUTO,
-  CWS_ERROR_EXTRACTED,
   CWS_USER_MAPPING,
-  CWS_BUILTIN_TABLE,
-  CWS_FUZZY_MATCH,
-  CWS_CATALOG_UNKNOWN,
   CWS_APPROX_DEFAULT,
-  effectiveSource,
-  sourceLabelKey,
-  sourceIcon,
 } from './tokens.js'
 import { SKILL_CONTENT_PREFIX, parseSkillBlock, findSkillBlock } from './skill-detect.js'
-import { extractWindowFromError, isContextLimitError, resolveWindowFromMaps } from './ctx-window.js'
-// Pure auto-retry / auto-continue decision primitives (§6 of the design: the
+import { extractWindowFromError, isContextLimitError } from './ctx-window.js'
 // stateful AutoRetryRunner is composed inline below against the current session
 // binding, but the guards/transitions are pure and unit-tested here).
 import {
@@ -57,6 +48,7 @@ import {
   consumeContinuation,
   isSelfEcho,
   isHandoffStub,
+  textHasQuestionMark,
   retryAttemptKey,
   requestIdForAttempt,
   isPersistenceArmed,
@@ -93,6 +85,12 @@ window.__ModuleLoader__.load({
       alertContextError: '会话上下文几乎用尽',
       alertCtxCluster: '上下文监控',
       alertOpenMonitorConfig: '打开监控配置',
+      alertWindowMismatch: '上下文窗口不匹配',
+      alertWindowMismatchDetail: '模型 {model} 的映射窗口 {mapped} 与请求上下文窗口 {actual} 不一致',
+      alertAdoptWindow: '采纳此窗口',
+      alertAdoptWindowDone: '已采纳 {model} 的上下文窗口 {actual}',
+      alertIgnoreMismatch: '忽略',
+      alertIgnoreMismatchDone: '已忽略 {model} 的窗口不匹配提醒',
       // Skills used in this session
       alertSkillUsed: '使用了技能',
       ctxSkillsSection: '本会话使用的技能',
@@ -122,29 +120,16 @@ window.__ModuleLoader__.load({
       ctxPollMin: '上下文轮询最小间隔',
       ctxPollMinTip: '上下文占比很高时的采样间隔（地板）。防止采样过于频繁。默认 2 秒。',
       // Context data source quality
-      ctxSourcePrecise: '精确',
-      ctxSourceUnavailable: '等待数据',
-      ctxModelWindowMap: '模型窗口映射',
-      ctxCurrentModel: '当前模型',
-      ctxWindowTokens: '窗口大小',
-      ctxWindowSource: '窗口来源',
-      ctxDataSource: '数据来源',
       ctxParamsSection: '配置参数',
-      ctxInputTokens: '输入Token',
-      ctxPressureTokens: '上下文压力',
       ctxApproxWindowHint: '未知模型的默认窗口',
       ctxSrcRequestContext: '会话事件',
       ctxSrcCatalogAuto: '模型目录',
       ctxSrcCatalogUnknown: '目录未知',
       ctxSrcErrorExtracted: '错误解析',
-      ctxSrcUserMapping: '手动配置',
       ctxSrcBuiltinTable: '内置表',
       ctxSrcFuzzyMatch: '模糊匹配',
       ctxSrcApproxDefault: '估算默认',
       ctxSrcUnknown: '未知',
-      ctxCatalogLoading: '加载中…',
-      ctxCatalogError: '目录加载失败',
-      ctxCatalogRefresh: '刷新目录',
       ctxNoWindow: '—',
       // Auto-Retry / auto-continue
       ctxAutoRetrySection: '自动继续',
@@ -184,6 +169,15 @@ window.__ModuleLoader__.load({
       autoRetryExitedLocSep: '，',
       autoRetryExitedLocOpen: '（',
       autoRetryExitedLocClose: '）',
+      // Turn-ending judgement (info alert naming how the settled turn ended)
+      turnVerdictTitle: '本轮对话判定',
+      turnVerdictNormal: '正常收尾',
+      turnVerdictError: '出错结束',
+      turnVerdictInterrupted: '被打断',
+      turnVerdictMaxTokens: '达到输出上限',
+      turnVerdictQuestion: '模型在等待你的回答',
+      turnVerdictHandoff: '模型只承诺了后续（待继续）',
+      turnVerdictDetail: '（{value}）',
       // Quick-control switch label (one-click manual off / re-arm)
       autoRetryQuickLabel: '自动继续',
       // Alert preview
@@ -196,6 +190,12 @@ window.__ModuleLoader__.load({
       alertContextError: 'Session context almost exhausted',
       alertCtxCluster: 'Context Monitor',
       alertOpenMonitorConfig: 'Open monitor config',
+      alertWindowMismatch: 'Context window mismatch',
+      alertWindowMismatchDetail: 'Model {model}: mapped window {mapped} differs from the request/context window {actual}',
+      alertAdoptWindow: 'Adopt this window',
+      alertAdoptWindowDone: 'Adopted {model} context window {actual}',
+      alertIgnoreMismatch: 'Ignore',
+      alertIgnoreMismatchDone: 'Ignored window-mismatch alerts for {model}',
       // Skills used in this session
       alertSkillUsed: 'Skill used',
       ctxSkillsSection: 'Skills used in this session',
@@ -225,29 +225,16 @@ window.__ModuleLoader__.load({
       ctxPollMin: 'Context Poll Min Interval',
       ctxPollMinTip: 'Minimum sampling interval even when context usage is high (the floor). Prevents excessive polling. Default 2s.',
       // Context data source quality
-      ctxSourcePrecise: 'Precise',
-      ctxSourceUnavailable: 'Awaiting data',
-      ctxModelWindowMap: 'Model Window Map',
-      ctxCurrentModel: 'Current Model',
-      ctxWindowTokens: 'Window Size',
-      ctxWindowSource: 'Window Source',
-      ctxDataSource: 'Data Source',
       ctxParamsSection: 'Configuration',
-      ctxInputTokens: 'Input Tokens',
-      ctxPressureTokens: 'Context Pressure',
       ctxApproxWindowHint: 'Default for unknown models',
       ctxSrcRequestContext: 'Session Event',
       ctxSrcCatalogAuto: 'Model Catalog',
       ctxSrcCatalogUnknown: 'Catalog (unknown)',
       ctxSrcErrorExtracted: 'Error Parsed',
-      ctxSrcUserMapping: 'Manual',
       ctxSrcBuiltinTable: 'Built-in',
       ctxSrcFuzzyMatch: 'Fuzzy Match',
       ctxSrcApproxDefault: 'Fallback',
       ctxSrcUnknown: 'Unknown',
-      ctxCatalogLoading: 'Loading…',
-      ctxCatalogError: 'Catalog failed',
-      ctxCatalogRefresh: 'Refresh Catalog',
       ctxNoWindow: '—',
       // Auto-Retry / auto-continue
       ctxAutoRetrySection: 'Auto-Retry',
@@ -287,6 +274,15 @@ window.__ModuleLoader__.load({
       autoRetryExitedLocSep: ', ',
       autoRetryExitedLocOpen: ' (',
       autoRetryExitedLocClose: ')',
+      // Turn-ending judgement (info alert naming how the settled turn ended)
+      turnVerdictTitle: 'Turn ending judgement',
+      turnVerdictNormal: 'Ended normally',
+      turnVerdictError: 'Ended with an error',
+      turnVerdictInterrupted: 'Was interrupted',
+      turnVerdictMaxTokens: 'Hit the output limit',
+      turnVerdictQuestion: 'Model is waiting for your answer',
+      turnVerdictHandoff: 'Model only promised a follow-up (to continue)',
+      turnVerdictDetail: ' ({value})',
       // Quick-control switch label (one-click manual off / re-arm)
       autoRetryQuickLabel: 'Auto-continue',
       // Alert preview
@@ -370,8 +366,6 @@ window.__ModuleLoader__.load({
       ctxThresholdError: 95,
       ctxPollBase: 20000,
       ctxPollMin: 2000,
-      modelContextWindows: {},
-      modelContextWindowSources: {},
       // Auto-Retry / auto-continue tuning (mirrors src/index.ts volatile fields)
       autoRetryGraceMs: 5000,
       autoRetryCooldownMs: 20000,
@@ -466,8 +460,6 @@ var _PREFS_MAX_RETRIES = 8
           ctxThresholdError: resolved.ctxThresholdError,
           ctxPollBase: resolved.ctxPollBase,
           ctxPollMin: resolved.ctxPollMin,
-          modelContextWindows: resolved.modelContextWindows,
-          modelContextWindowSources: resolved.modelContextWindowSources,
           autoRetryGraceMs: resolved.autoRetryGraceMs,
           autoRetryCooldownMs: resolved.autoRetryCooldownMs,
           autoRetryMaxConsecutive: resolved.autoRetryMaxConsecutive,
@@ -522,10 +514,11 @@ var _PREFS_MAX_RETRIES = 8
       return _queuePrefWrite(ctx, patch, onError, saved)
     }
 
-    /** Roll the optimistic in-memory write back after the host refused it, and
-     *  say so. A rejected write used to be completely silent, which is what let
-     *  the non-volatile modelContextWindows bug hide: the mapping appeared in
-     *  the panel, the host rejected it, and it was rolled back with no trace. */
+    /** Roll the optimistic in-memory write back after the host refused it. A
+     *  rejected write used to be completely silent, which is what let stale
+     *  preference reads survive: the value appeared in the panel, the host
+     *  rejected it, and the in-memory copy was rolled back with no trace. Here
+     *  the rollback is logged so a refusal is never invisible. */
     function _revertPrefs(patch, saved, reason) {
       try {
         console.warn('[dsh-flash-ctx-mon] preference write rejected: ' + reason
@@ -596,28 +589,6 @@ var _PREFS_MAX_RETRIES = 8
     // modules/tokens.js (single source of truth, unit-tested).  Only the
     // stateful, closure-bound pieces below stay inline.
 
-    /** Model name → context window size (tokens).  Retired — the table
-     *  contained outdated models and is no longer consulted.  Kept as an
-     *  empty object so that stored modelContextWindowSources entries with
-     *  'builtin-table' / 'fuzzy-match' provenance still render correctly
-     *  in the editor (they were written from this table in earlier versions). */
-    var _KNOWN_WINDOWS = {}
-
-    /** Cached model catalog from remote.session.modelCatalog().
-     *  Structure: { groups: [{id, name, models: [{id, name}]}], ... }
-     *  Refreshed on demand by _fetchModelCatalog(). */
-    var _modelCatalog = null
-    var _modelCatalogPromise = null
-    var _modelCatalogError = null
-
-    /** Record why the model-catalog read failed. It is shown in the panel and
-     *  echoed to the console, because otherwise this failure is invisible
-     *  outside the modal. */
-    function _setModelCatalogError(reason) {
-      _modelCatalogError = reason
-      try { console.warn('[dsh-flash-ctx-mon] model catalog unavailable: ' + reason) } catch (_) {}
-    }
-
     /** Resolve one Client Remote namespace, e.g. 'session' or 'skills'.
      *
      *  The reliable route is the SERVICE KEY `remote.<namespace>` — the same
@@ -648,120 +619,6 @@ var _PREFS_MAX_RETRIES = 8
       return null
     }
 
-    /** Fetch the DSH model catalog from the `session` Remote namespace.
-     *  Returns the catalog (cached after first successful fetch).
-     *  Auto-fills modelContextWindows for catalog models whose window
-     *  size is known from _resolveWindow() but not yet stored. */
-    function _fetchModelCatalog(ctx) {
-      if (_modelCatalog) return Promise.resolve(_modelCatalog)
-      if (_modelCatalogPromise) return _modelCatalogPromise
-      try {
-        var session = resolveRemoteNamespace(ctx, 'session')
-        if (!session || typeof session.modelCatalog !== 'function') {
-          _setModelCatalogError('no remote.session namespace (resolved ' + String(session) + ')')
-          return Promise.resolve(null)
-        }
-        _modelCatalogPromise = session.modelCatalog().then(function (result) {
-          _modelCatalogPromise = null
-          if (result && result.ok && result.value) {
-            _modelCatalog = result.value
-            _modelCatalogError = null
-            // Auto-fill context windows for catalog models not yet stored
-            _autoFillCatalogWindows(ctx)
-            return _modelCatalog
-          }
-          var err = (result && result.error) || null
-          _setModelCatalogError('rpc ' + (err ? ((err.code || 'failed') + (err.message ? ': ' + err.message : ''))
-            : ('no result (ok=' + (result && result.ok) + ')')))
-          return null
-        }).catch(function (e) {
-          _modelCatalogPromise = null
-          _setModelCatalogError('threw: ' + (e && e.message || e))
-          return null
-        })
-        return _modelCatalogPromise
-      } catch (e) {
-        _setModelCatalogError('remote.session access threw: ' + (e && e.message || e))
-        return Promise.resolve(null)
-      }
-    }
-
-    /** Auto-fill modelContextWindows for models in the catalog.
-     *  Since the builtin table was retired, _resolveWindow() only reads from
-     *  modelContextWindows — the same map we'd be writing into — so this
-     *  function is now a no-op.  Kept as a stub in case a future source
-     *  (e.g. an API-provided window list) is added. */
-    function _autoFillCatalogWindows(ctx) {
-      // No-op: without the builtin table, _resolveWindow() can only return
-      // values already in modelContextWindows, which this function would
-      // skip anyway (the "already stored" guard).
-    }
-
-    /** Build a unified list of all known models for the editor.
-     *  Merges: user config (includes error-extracted) → catalog models.
-     *  Each entry: { id, name?, window, source, provider?, sourceLabel }
-     *  where sourceLabel is a short human-readable label for the source. */
-    function _allKnownModels() {
-      var seen = {}   // id → entry (first write wins per priority)
-      var entries = []
-
-      function addEntry(id, name, window, source, provider) {
-        if (!id) return
-        if (seen[id]) return   // first write wins
-        seen[id] = true
-        entries.push({
-          id: id,
-          name: name || null,
-          window: window,
-          source: source,
-          provider: provider || null,
-          maxTokens: _resolveMaxTokens(id),
-        })
-      }
-
-      // 1. User-configured overrides (highest priority — already stored)
-      var userMap = _alertPref('modelContextWindows')
-      var userSources = _alertPref('modelContextWindowSources')
-      if (userMap && typeof userMap === 'object') {
-        var userKeys = Object.keys(userMap)
-        for (var i = 0; i < userKeys.length; i++) {
-          var k = userKeys[i]
-          var src = (userSources && userSources[k]) || CWS_USER_MAPPING
-          var _uw = _resolveWindow(k)
-          addEntry(k, null, _uw.window, src, null)
-        }
-      }
-
-      // 2. Catalog models (from DSH model catalog)
-      if (_modelCatalog && _modelCatalog.groups) {
-        for (var gi = 0; gi < _modelCatalog.groups.length; gi++) {
-          var group = _modelCatalog.groups[gi]
-          if (!group || !group.models) continue
-          for (var mi = 0; mi < group.models.length; mi++) {
-            var model = group.models[mi]
-            if (!model || !model.id) continue
-            // If already in user config, skip (first-write-wins)
-            if (seen[model.id]) continue
-            // Try to get window from resolve chain
-            var resolved = _resolveWindow(model.id)
-            // llm-pi-ai registered models are shown as user mappings
-            var _llmRowC = !!_llmModelEntry(model.id)
-            var entrySource = _llmRowC
-              ? CWS_USER_MAPPING
-              : (resolved.window ? CWS_CATALOG_AUTO : CWS_CATALOG_UNKNOWN)
-            addEntry(model.id, model.name, resolved.window, entrySource, group.id)
-          }
-        }
-      }
-
-      // Sort: models with window values first, then alphabetically by id
-      entries.sort(function (a, b) {
-        if (a.window != null && b.window == null) return -1
-        if (a.window == null && b.window != null) return 1
-        return (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
-      })
-      return entries
-    }
 
     function _llmModelEntry(modelId) {
       if (!modelId) return null
@@ -779,123 +636,6 @@ var _PREFS_MAX_RETRIES = 8
       return null
     }
 
-    function _resolveMaxTokens(modelName) {
-      if (!modelName) return null
-      var llm = _llmModelEntry(modelName)
-      if (llm) {
-        var _pv2 = _llmPiAiState.providers[llm.providerId]
-        var _me2 = _pv2 && _pv2.models && _pv2.models[llm.index]
-        if (_me2 && _me2.maxTokens != null) return _me2.maxTokens
-      }
-      return null
-    }
-
-    /** Persist contextWindow / maxTokens into the authoritative
-     *  @deepseek-ai/dsh-llm-pi-ai namespace (providers.<pid>.models[].field).
-     *  update() deep-merges plain objects and REPLACES arrays, so we pass the
-     *  full replaced models array for the target provider, preserving every
-     *  other provider/model field. patch values: number to set, null to remove.
-     *  Returns a Promise<boolean>. On failure onError(patch) is called for
-     *  symmetry with savePrefs (no local mirror to revert). */
-    function _writeLlmpiAiModel(ctx, modelId, patch, onError) {
-      var settings = _remoteSettings(ctx)
-      if (!settings || typeof settings.describe !== 'function' || typeof settings.update !== 'function') {
-        if (onError) onError(patch, function () {})
-        return Promise.resolve(false)
-      }
-      return _describeAsync(settings).then(function (desc) {
-        var view = desc && (desc.value || desc)
-        var list = view && Array.isArray(view.namespaces)
-          ? view.namespaces
-          : (Array.isArray(view) ? view : null)
-        var ns = list && list.find(function (n) { return (n && (n.ns || n.namespace)) === LLM_PI_AI_NS })
-        if (!ns) { if (onError) onError(patch, function () {}); return false }
-        var value = ns.value || ns.resolved || {}
-        var providers = value.providers || {}
-        var keys = Object.keys(providers)
-        var pid = null, idx = -1
-        for (var i = 0; i < keys.length; i++) {
-          var models = providers[keys[i]] && providers[keys[i]].models
-          if (!Array.isArray(models)) continue
-          for (var j = 0; j < models.length; j++) {
-            if (models[j] && models[j].id === modelId) { pid = keys[i]; idx = j; break }
-          }
-          if (pid) break
-        }
-        if (!pid) { if (onError) onError(patch, function () {}); return false }
-        var modelsArr = providers[pid].models
-        var next = modelsArr.map(function (m) { return Object.assign({}, m) })
-        for (var field in patch) {
-          if (!Object.prototype.hasOwnProperty.call(patch, field)) continue
-          if (patch[field] === null) delete next[idx][field]
-          else next[idx][field] = patch[field]
-        }
-        var providerPatch = {}
-        providerPatch[pid] = { models: next }
-        var rev = typeof ns.revision === 'number' ? ns.revision : undefined
-        return Promise.resolve(settings.update(LLM_PI_AI_NS, { providers: providerPatch }, rev)).then(function (res) {
-          var rv = res && res.value
-          var np = rv && rv.providers
-          if (np && typeof np === 'object') _llmPiAiState.providers = np
-          if (rv && typeof rv.revision === 'number') _llmPiAiState.revision = rv.revision
-          return true
-        }).catch(function (err) {
-          console.warn('[dsh-flash-ctx-mon] llm-pi-ai write failed:', err && err.message)
-          if (onError) onError(patch, function () {})
-          return false
-        })
-      }).catch(function (err) {
-        console.warn('[dsh-flash-ctx-mon] llm-pi-ai describe failed:', err && err.message)
-        if (onError) onError(patch, function () {})
-        return false
-      })
-    }
-
-    /** Re-read the llm-pi-ai namespace so the mirror stays authoritative. */
-    function _refreshLlmpiAi(ctx) {
-      var settings = _remoteSettings(ctx)
-      if (!settings || typeof settings.describe !== 'function') return Promise.resolve(false)
-      return _describeAsync(settings).then(function (desc) {
-        var view = desc && (desc.value || desc)
-        var list = view && Array.isArray(view.namespaces)
-          ? view.namespaces
-          : (Array.isArray(view) ? view : null)
-        var ns = list && list.find(function (n) { return (n && (n.ns || n.namespace)) === LLM_PI_AI_NS })
-        if (!ns) return false
-        var _pv3 = ns.value || ns.resolved
-        _llmPiAiState.providers = _pv3 && _pv3.providers ? _pv3.providers : Object.create(null)
-        if (typeof ns.revision === 'number') _llmPiAiState.revision = ns.revision
-        _llmPiAiState.present = true
-        return true
-      }).catch(function () { return false })
-    }
-
-    /** Commit a single model field edit. field is 'contextWindow' | 'maxTokens'.
-     *  valueOrNull is a number to set, or null to clear. Persists into llm-pi-ai
-     *  when the model is registered there; otherwise falls back to the legacy
-     *  ctx-mon map (contextWindow only). */
-    function _commitModelField(ctx, id, field, valueOrNull, setTick) {
-      var llm = _llmModelEntry(id)
-      if (llm) {
-        var p = {}
-        p[field] = valueOrNull
-        _writeLlmpiAiModel(ctx, id, p, function () {}).then(function (ok) {
-          if (!ok) _refreshLlmpiAi(ctx)
-          setTick(function (v) { return v + 1 })
-        })
-        return
-      }
-      if (field === 'contextWindow') {
-        var updated = Object.assign({}, _alertPref('modelContextWindows') || {})
-        if (valueOrNull === null) delete updated[id]
-        else updated[id] = valueOrNull
-        var updatedSources = Object.assign({}, _alertPref('modelContextWindowSources') || {})
-        if (valueOrNull === null) delete updatedSources[id]
-        else updatedSources[id] = CWS_USER_MAPPING
-        savePrefs(ctx, { modelContextWindows: updated, modelContextWindowSources: updatedSources }, null, function () {})
-      }
-      setTick(function (v) { return v + 1 })
-    }
     function _resolveWindow(modelName) {
       if (!modelName) return { window: null, source: CWS_APPROX_DEFAULT }
       // 0. Authoritative llm-pi-ai model config (persisted into the DSH profile
@@ -908,19 +648,88 @@ var _PREFS_MAX_RETRIES = 8
           return { window: _mw.contextWindow, source: CWS_USER_MAPPING }
         }
       }
-      // 1. Legacy user-configured mapping (host pref) — includes error-extracted &
-      //    catalog-auto values that were persisted into modelContextWindows.
-      var custom = _alertPref('modelContextWindows')
-      if (custom && typeof custom === 'object' && custom[modelName]) {
-        // Check provenance — if this entry came from error extraction or catalog, label it
-        var sources = _alertPref('modelContextWindowSources')
-        var src = (sources && typeof sources === 'object' && sources[modelName])
-          ? sources[modelName]
-          : CWS_USER_MAPPING
-        return { window: custom[modelName], source: src }
-      }
-      // 2. Unknown model — return null (caller uses ctxApproxWindow as default)
+      // 1. No authoritative configured window for this model — return null
+      //    (caller uses ctxApproxWindow as default).
       return { window: null, source: CWS_APPROX_DEFAULT }
+    }
+
+    /** "Adopt this window": persist the model's authoritative request/context
+     *  window into the DSH profile's llm-pi-ai model config (global persisted
+     *  change), then keep the in-memory view in sync.
+     *
+     *  This is a cross-namespace write into the DSH llm-pi-ai config the user
+     *  sanctioned explicitly. It re-describes the latest llm-pi-ai view so it
+     *  does not silently overwrite other providers/models the user edited since
+     *  the last describe, deep-copies the whole providers object so unrelated
+     *  fields survive, and writes via the settings service's revision fence to
+     *  survive concurrent edits.
+     *
+     *  onDone(ok): ok=true means the window was persisted and in-memory state
+     *  was refreshed; ok=false means the host refused (settings/conflict or
+     *  settings/rejected) and nothing was changed. */
+    function _persistAdopt(ctx, mm) {
+      var settings = _remoteSettings(ctx)
+      if (!settings || typeof settings.update !== 'function' || !mm || !mm.model) {
+        return Promise.resolve(false)
+      }
+      return _describeAsync(settings).then(function (desc) {
+        var view = desc && (desc.value || desc)
+        var list = view && Array.isArray(view.namespaces) ? view.namespaces : null
+        var entry = list ? list.find(function (n) {
+          return (n && (n.ns || n.namespace)) === LLM_PI_AI_NS
+        }) : null
+        var current = entry && (entry.value || entry.resolved)
+        var providers = current && current.providers
+        if (!providers || typeof providers !== 'object') {
+          return false
+        }
+        // Deep copy every provider so unrelated provider/model fields survive.
+        var clone = {}
+        var pids = Object.keys(providers)
+        var matched = false
+        for (var i = 0; i < pids.length; i++) {
+          var pid = pids[i]
+          var prov = providers[pid]
+          if (!prov || typeof prov !== 'object') { clone[pid] = prov; continue }
+          var provClone = {}
+          for (var pk in prov) if (Object.prototype.hasOwnProperty.call(prov, pk)) provClone[pk] = prov[pk]
+          var models = Array.isArray(provClone.models) ? provClone.models : null
+          if (Array.isArray(models)) {
+            provClone.models = models.slice(0)
+            for (var j = 0; j < provClone.models.length; j++) {
+              var m = provClone.models[j]
+              if (m && typeof m === 'object' && m.id === mm.model) {
+                var mClone = {}
+                for (var mk in m) if (Object.prototype.hasOwnProperty.call(m, mk)) mClone[mk] = m[mk]
+                mClone.contextWindow = mm.requestWindow
+                provClone.models[j] = mClone
+                matched = true
+              }
+            }
+          }
+          clone[pid] = provClone
+        }
+        if (!matched) {
+          // Model no longer present in the latest llm-pi-ai view — nothing to
+          // persist. Surface the refusal rather than pretending we adopted.
+          return false
+        }
+        var rev = typeof entry.revision === 'number' ? entry.revision
+          : (typeof _llmPiAiState.revision === 'number' ? _llmPiAiState.revision : undefined)
+        return settings.update(LLM_PI_AI_NS, { providers: clone }, rev).then(function () {
+          _llmPiAiState.providers = clone
+          _llmPiAiState.revision = typeof entry.revision === 'number' ? entry.revision : _llmPiAiState.revision
+          _llmPiAiState.present = true
+          return true
+        }).catch(function (err) {
+          var msg = err && err.message ? err.message : String(err)
+          console.warn('[dsh-flash-ctx-mon] adopt window rejected: ' + msg)
+          return false
+        })
+      }).catch(function (err) {
+        console.warn('[dsh-flash-ctx-mon] adopt window describe failed: ' + (err && err.message ? err.message : String(err)))
+        return false
+      })
     }
 
     //#endregion ───────────────────────────────────────────────────────────────
@@ -942,6 +751,20 @@ var _PREFS_MAX_RETRIES = 8
     /** Reference to the active SessionEventTokenSource, set by createSessionContextProvider.
      *  The MonitorConfigModal reads token estimates from this. */
     var _activeTokenSource = null
+
+    /** Optional hook the quick-control auto-continue switch registers so the
+     *  token source can nudge it to re-evaluate its visible()/getValue() when a
+     *  session bind (or un-bind) transition happens. The switch only appears
+     *  once a session is bound, so this is what makes it appear/disappear
+     *  immediately on bind success instead of waiting for the user's next
+     *  unrelated panel action. Null while the switch is not registered. */
+    var _notifyAutoRetryQuick = null
+
+    /** The most recent session id the rendered panel reported for binding. Kept
+     *  at module scope so a SkillChip that mounts before its target source has
+     *  started can still hand the id over once that source starts — otherwise
+     *  the bind is skipped once and (with deps `[sessionId]`) never re-runs. */
+    var _injectedSessionId = null
 
     /** Quick-control switch id for the manual auto-continue on/off entry. Kept
      *  distinct from TOGGLE_KEY (the context-monitor master toggle) so panel
@@ -1015,25 +838,18 @@ var _PREFS_MAX_RETRIES = 8
             'box-shadow:0 0 0 2px rgba(224,49,49,.9),0 0 10px 2px rgba(224,49,49,.5) !important;' +
             'animation:none !important;' +
           '}',
-          // Color the icon itself so armed/scheduled read at a glance even when
-          // the glow is subtle. dsh-flash sets the color inline, so !important
-          // is required to win over its stylesheet.
-          'html[data-ctx-mon-autoretry=armed] [data-dsh-flash-trigger]{' +
-            'color:rgba(47,158,68,1) !important;' +
-          '}',
-          'html[data-ctx-mon-autoretry=scheduled] [data-dsh-flash-trigger]{' +
-            'color:rgba(232,89,12,1) !important;' +
-          '}',
-          'html[data-ctx-mon-autoretry=paused] [data-dsh-flash-trigger]{' +
-            'color:rgba(224,49,49,1) !important;' +
-          '}',
+          // The flash icon KEEPS dsh-flash's own color and its translucent
+          // outline — we do NOT repaint it per auto-continue state, so the ring
+          // on the bolt itself never changes color. Only the surrounding glow
+          // (above) and the attempt badge (below) carry per-state color; the
+          // icon body and its outline stay at dsh-flash's default.
           // Numeric attempt badge (bottom-left pill) driven by a data attribute we
           // put on the button itself; it inherits the state color. Hidden by the
           // lack of the data attribute (stopped), so no matching element is shown.
           'html[data-ctx-mon-autoretry] [data-dsh-flash-trigger][data-ctx-mon-autoretry-attempt]::after{' +
             'content:attr(data-ctx-mon-autoretry-attempt);' +
             'position:absolute;bottom:-5px;left:-5px;min-width:15px;height:15px;' +
-            'padding:0 4px;border-radius:8px;font-size:9px;line-height:15px;' +
+            'padding:0 4px;border-radius:8px;font-size:10px;line-height:15px;' +
             'text-align:center;font-weight:700;color:#fff;' +
             'z-index:1;' +
           '}',
@@ -1169,6 +985,75 @@ var _PREFS_MAX_RETRIES = 8
       } catch (_) {}
     }
 
+    /** Re-paint the auto-continue numeric badge / re-arm chip onto dsh-flash's
+     *  trigger button(s) after the DOM changed underneath us.
+     *
+     *  dsh-flash reparents/rebuilds its `[data-dsh-flash-trigger]` element when
+     *  the trigger position changes (`applyTrigger()` unmounts + remounts the
+     *  button). Because we stamp the `::after` badge as a data attribute on that
+     *  element and pin the paused re-arm chip INSIDE it, a rebuild silently
+     *  drops both — and nothing re-publishes the auto-retry view, so the badge
+     *  would stay gone until the next publish. This observer watches for that
+     *  specific rebuild and re-runs the stamping with the latest view. */
+    var _triggerRepaintObserver = null
+    var _triggerRepaintPending = false
+
+    /** True when a MutationRecord mounts, unmounts or moves a trigger element. */
+    function _isTriggerMutation(m) {
+      function isTriggerNode(n) {
+        if (!n || n.nodeType !== 1) return false
+        return !!(n.hasAttribute && n.hasAttribute('data-dsh-flash-trigger')) ||
+          !!(n.querySelector && n.querySelector('[data-dsh-flash-trigger]'))
+      }
+      // Only direct add/remove/move of a trigger root counts as a rebuild; a
+      // chip we pin INSIDE the trigger mutates the same parent (target) but must
+      // not re-trigger a repaint — adding that would just converge, yet wastes a
+      // frame. So we inspect added/removed nodes only, never m.target.
+      if (m.addedNodes) for (var a = 0; a < m.addedNodes.length; a++) { if (isTriggerNode(m.addedNodes[a])) return true }
+      if (m.removedNodes) for (var r = 0; r < m.removedNodes.length; r++) { if (isTriggerNode(m.removedNodes[r])) return true }
+      return false
+    }
+
+    function _syncTriggerRepaint() {
+      _triggerRepaintPending = false
+      if (typeof document === 'undefined') return
+      var src = _activeTokenSource
+      var view = (src && typeof src.getAutoRetryView === 'function') ? src.getAutoRetryView() : null
+      try { _syncAutoRetryDomIndicator(view) } catch (_) {}
+    }
+
+    /** Start observing rebuilds of dsh-flash's trigger button(s). Idempotent —
+     *  safe to call on every apply. Only reacts to `[data-dsh-flash-trigger]`
+     *  node add/remove (a position switch unmounts and remounts the button),
+     *  debounced to one re-paint per mutation burst. */
+    function _ensureTriggerRepaintObserver() {
+      if (typeof document === 'undefined' || !document.body || !document.body.isConnected) return
+      if (_triggerRepaintObserver || typeof MutationObserver === 'undefined') return
+      try {
+        _triggerRepaintObserver = new MutationObserver(function (records) {
+          if (_triggerRepaintPending) return
+          for (var i = 0; i < records.length; i++) {
+            if (_isTriggerMutation(records[i])) {
+              _triggerRepaintPending = true
+              if (typeof requestAnimationFrame === 'function') requestAnimationFrame(_syncTriggerRepaint)
+              if (typeof setTimeout === 'function') setTimeout(_syncTriggerRepaint, 50)
+              break
+            }
+          }
+        })
+        _triggerRepaintObserver.observe(document.body, { childList: true, subtree: true })
+      } catch (_) { _triggerRepaintObserver = null }
+    }
+
+    /** Stop the trigger-rebuild observer. Called on dispose. */
+    function _stopTriggerRepaintObserver() {
+      if (_triggerRepaintObserver) {
+        try { _triggerRepaintObserver.disconnect() } catch (_) {}
+        _triggerRepaintObserver = null
+      }
+      _triggerRepaintPending = false
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Open-turn ledger backing the auto-continue path (§8, form ①).
     //
@@ -1249,6 +1134,40 @@ var _PREFS_MAX_RETRIES = 8
      *  the cause is genuinely useful. */
     var AUTO_RETRY_EXIT_REASONS = ['budget', 'prompt-failed']
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // "Turn-ending judgement" info alert (session-event → provider channel).
+    //
+    // Pure local rule-based classification of how the CURRENT session's most
+    // recent turn came to an end (normal / error / interrupted / max-tokens /
+    // awaiting-answer / handoff-stub). The `turn/end` handler records ONE
+    // pending judgement; the alert provider claims it on the next poll and
+    // surfaces it ONCE as an info toast. Every judgement carries a unique id
+    // (the turn-end wall-clock), so — unlike a stable id — it can never be
+    // re-toasted after registry eviction, and claiming nulls it so a single
+    // turn/end never restarts the notice.
+    var _turnVerdictPending = null
+
+    /**
+     * Classify how a settled turn ended, purely from its `turn/end` reason and
+     * the assistant tail text. Mirrors the reason taxonomy already used by the
+     * auto-retry primitives (`isRetryableEnd` / `isHandoffStub` /
+     * `textHasQuestionMark`) so the two surfaces agree on terminology.
+     * Returns a verdict record or null (nothing informative to report).
+     */
+    function _classifyTurnEnd(reason, lastText) {
+      var kind = reason && reason.kind
+      if (kind === 'error') {
+        var failure = reason.error
+        var code = failure && failure.code ? String(failure.code) : null
+        return { verdictKey: 'turnVerdictError', detail: code }
+      }
+      if (kind === 'interrupted') return { verdictKey: 'turnVerdictInterrupted', detail: null }
+      if (kind === 'max-tokens') return { verdictKey: 'turnVerdictMaxTokens', detail: null }
+      if (textHasQuestionMark(lastText)) return { verdictKey: 'turnVerdictQuestion', detail: null }
+      if (isHandoffStub(lastText)) return { verdictKey: 'turnVerdictHandoff', detail: null }
+      return { verdictKey: 'turnVerdictNormal', detail: null }
+    }
+
     /**
      * SessionEventTokenSource — reads precise token usage from DSH's session
      * event stream via the `sessions` service.
@@ -1288,6 +1207,17 @@ var _PREFS_MAX_RETRIES = 8
        *  it rather than size the new model's pressure against the old model's
        *  window. Null means the cached value has no model behind it. */
       var _contextWindowModel = null
+      /** Pending window-mismatch record: set in request/context when the
+       *  adapter's authoritative contextWindow disagrees with the
+       *  user-mapped/config window for the same model. Surfaced as an explicit
+       *  alert rather than a silent override. Null when they agree. */
+      var _windowMismatch = null
+      /** Models whose window-mismatch alert the user chose to IGNORE this
+       *  session. Session-scoped by design: the request/context window is
+       *  authoritative and non-persisted, so there is nothing durable to record
+       *  — and an ignored model must not be silently re-alerted while the
+       *  mismatch holds, but a fresh session should surface it again. */
+      var _mismatchIgnored = Object.create(null)
       var _sessions = null
       var _sessionId = null
       // Session id fed from the rendered panel (slot `props.sessionId`). The
@@ -1298,6 +1228,7 @@ var _PREFS_MAX_RETRIES = 8
       var _ctx = null       // Cordis context for preference writes (set in start)
       var _bindRetryTimer = null
       var _bindRetryCount = 0
+      var _serviceRetryTimer = null   // persistent sessions-service retry (the service may register a beat late)
 
       // ─────────────────────────────────────────────────────────────────────
       // Auto-retry / auto-continue runner state (§6 of the design).
@@ -1745,9 +1676,15 @@ var _PREFS_MAX_RETRIES = 8
       function _handleTurnEnd(reason) {
         try {
           var turnRetryable = isRetryableEnd(reason) || isHandoffStub(_lastAssistantText)
+          // The model's last output asks a question → this turn ends by handing
+          // off to the user for an answer. Skip the automatic "继续" this turn
+          // and wait for their feedback; the guard stays armed so a later
+          // turn/end resumes auto-continue normally (§5.6 "question ending").
+          var mustWaitForAnswer = textHasQuestionMark(_lastAssistantText)
           if (!turnRetryable) {
             // Normal completion. Keep going only if the guard is already armed
-            // (and not frozen); otherwise leave the unarmed session alone.
+            // (and not frozen); otherwise leave the unarmed session alone. A
+            // question-ending is covered by the shared gate below.
             var prearmed = _activeAutoRetryRecord()
             if (!prearmed || !prearmed.armed || prearmed.paused) return
           } else {
@@ -1764,6 +1701,13 @@ var _PREFS_MAX_RETRIES = 8
               _retryTimersClear()
               _noteAutoRetryExit('budget')
             }
+            _publishAutoRetryView()
+            return
+          }
+          if (mustWaitForAnswer) {
+            // Last output asks a question — do not auto-send "继续"; the user is
+            // expected to answer. Keep the guard armed and just re-frame the
+            // view so no emission is scheduled for this turn.
             _publishAutoRetryView()
             return
           }
@@ -1912,51 +1856,6 @@ var _PREFS_MAX_RETRIES = 8
         }
       }
 
-      /** Canonical persistence of a derived context window for a model.
-       *  Shared by the error-extraction and request/context paths.
-       *  Merges into modelContextWindows and records provenance in
-       *  modelContextWindowSources. Only writes when the value differs from
-       *  what is already stored, and never overwrites a user-mapping source
-       *  (user intent > auto-detected).
-       *  clobber policy:
-       *  - 'always' — overwrite any other stored source. Used by the
-       *    error-extraction path: the extracted value comes directly from the
-       *    provider's own rejection response and is the most authoritative
-       *    source for the model's true context window.
-       *  - 'same-source-only' — keep a stored value that came from a different
-       *    source than `srcLabel` (it is a deliberate override: user edit,
-       *    error extraction, or catalog-auto) and disagrees with a stale
-       *    fallback (e.g. DEFAULT_CONTEXT_WINDOW); only a previously stored
-       *    value from `srcLabel` itself may be updated in place. */
-      function _persistWindow(windowValue, model, opts) {
-        if (!windowValue || !model || !_ctx) return
-        var currentMap = _alertPref('modelContextWindows')
-        if (!currentMap || typeof currentMap !== 'object') currentMap = {}
-        // Skip if already stored with the same value
-        if (currentMap[model] === windowValue) return
-        // Check current source — do not overwrite user-mapping
-        var currentSources = _alertPref('modelContextWindowSources')
-        if (!currentSources || typeof currentSources !== 'object') currentSources = {}
-        var existingSrc = currentSources[model]
-        if (existingSrc === CWS_USER_MAPPING) return   // user intent wins
-        // A stored value from a source other than the incoming `srcLabel` is a
-        // deliberate override — do not clobber it unless the policy allows
-        // ('always' handles the most-authoritative error-extraction source).
-        if (opts.clobber !== 'always' && currentMap[model] != null && existingSrc && existingSrc !== opts.srcLabel) return
-        var updated = Object.assign({}, currentMap)
-        updated[model] = windowValue
-        var updatedSources = Object.assign({}, currentSources)
-        updatedSources[model] = opts.srcLabel
-        // Write both atomically in one patch
-        savePrefs(_ctx, {
-          modelContextWindows: updated,
-          modelContextWindowSources: updatedSources,
-        }, null, opts.onError || function () {})
-        // Error-extraction path also updates _contextWindow immediately so the
-        // next poll uses it (the request path resolves at read time instead).
-        if (opts.cacheWrite) _contextWindow = windowValue
-        console.log(opts.logPrefix + ' model=' + model + ' window=' + windowValue + ' source=' + opts.srcLabel)
-      }
 
       /** Extract usage from an assistant/message event.
        *  DSH may place usage directly on event.data.usage, OR embed it in the
@@ -2087,6 +1986,7 @@ var _PREFS_MAX_RETRIES = 8
                 _model = headerModel
                 _contextWindow = null
                 _contextWindowModel = null
+                _windowMismatch = null
               }
               // Only fill in a *local estimate* when no authoritative window has
               // arrived yet. A `request/context` set later must win (it carries
@@ -2106,18 +2006,41 @@ var _PREFS_MAX_RETRIES = 8
               _model = rctx.model
               _contextWindow = null
               _contextWindowModel = null
+              _windowMismatch = null
             }
             if (rctx && typeof rctx.contextWindow === 'number' && rctx.contextWindow > 0) {
-              // Persist the adapter-resolved window with source provenance
-              _persistWindow(rctx.contextWindow, _model, {
-                srcLabel: CWS_REQUEST_CONTEXT,
-                clobber: 'same-source-only',
-                logPrefix: '[dsh-flash-ctx-mon] context window from request/context:',
-              })
-              // For the in-memory value, prefer the user's override when one exists
+              // The request/context window is authoritative and non-persisted:
+              // cache it for read-time resolution but never write it into the
+              // (removed) modelContextWindows prefs. A window is only durably
+              // configured via the DSH profile's llm-pi-ai model config, and a
+              // user-configured override wins when one exists.
               var resolvedCtx = _resolveWindow(_model)
-              _contextWindow = resolvedCtx.window != null ? resolvedCtx.window : rctx.contextWindow
+              var requestWindow = rctx.contextWindow
+              _contextWindow = resolvedCtx.window != null ? resolvedCtx.window : requestWindow
               _contextWindowModel = _model
+              // Explicit mismatch: the adapter's own authoritative
+              // request/context window disagrees with what the user mapping /
+              // model config resolves for THIS model. Keeping the configured
+              // override is fine, but silence would hide a stale or wrong
+              // mapping, so surface it as an explicit alert panel.
+              //
+              // Compare at the display granularity (nearest whole K), matching
+              // how formatTokenK renders both numbers in the alert. A raw `!==`
+              // here flagged false positives: two allowed window sizes that
+              // differ only below the K boundary (e.g. 131072 vs 131200) both
+              // render as "128K" and yet were reported "inconsistent".
+              var mmK = Math.round(resolvedCtx.window / 1024)
+              var rqK = Math.round(requestWindow / 1024)
+              if (resolvedCtx.window != null && mmK !== rqK) {
+                _windowMismatch = {
+                  model: _model,
+                  mappingWindow: resolvedCtx.window,
+                  requestWindow: requestWindow,
+                  at: typeof ev.time === 'number' ? ev.time : Date.now(),
+                }
+              } else {
+                _windowMismatch = null
+              }
             }
             if (seq >= 0 && seq > _lastProcessedSeq) _lastProcessedSeq = seq
           }
@@ -2165,16 +2088,11 @@ var _PREFS_MAX_RETRIES = 8
                 if (failure && isContextLimitError(failure.code, failure.message)) {
                   var extractedWindow = extractWindowFromError(failure.message)
                   if (extractedWindow && _model) {
-                    _persistWindow(extractedWindow, _model, {
-                      srcLabel: CWS_ERROR_EXTRACTED + (failure.code ? ':' + failure.code : ''),
-                      clobber: 'always',
-                      cacheWrite: true,
-                      onError: function (patch, rollback) {
-                        console.warn('[dsh-flash-ctx-mon] failed to persist error-extracted window:', patch)
-                        if (rollback) rollback()
-                      },
-                      logPrefix: '[dsh-flash-ctx-mon] extracted context window from error:',
-                    })
+                    // Cache the error-extracted window in memory for the next
+                    // read-time resolution so the panel reflects the provider's
+                    // own rejection response immediately. Non-persisted: a window
+                    // is only durably configured via the llm-pi-ai model config.
+                    _contextWindow = extractedWindow
                   }
                 }
               }
@@ -2184,7 +2102,23 @@ var _PREFS_MAX_RETRIES = 8
               // late. Only a LIVE turn/end may mutate the armed state — a
               // replayed history of completed turns (compaction) must not clear
               // a persisted arm while the session still exists.
-              if (!replay) _handleTurnEnd(reason)
+              if (!replay) {
+                _handleTurnEnd(reason)
+                // Turn-ending judgement (info toast, plan A path): classify how
+                // THIS live turn settled from its reason + the assistant tail,
+                // and queue ONE unique-id info alert. The provider's poll claims
+                // it exactly once. Replay stays silent — history is not a "this
+                // turn just ended" signal and would only spam on reload/compaction.
+                var verdict = _classifyTurnEnd(reason, _lastAssistantText)
+                if (verdict) {
+                  _turnVerdictPending = {
+                    sessionId: _sessionId,
+                    at: typeof ev.time === 'number' ? ev.time : Date.now(),
+                    verdictKey: verdict.verdictKey,
+                    detail: verdict.detail,
+                  }
+                }
+              }
             }
             if (seq >= 0 && seq > _lastProcessedSeq) _lastProcessedSeq = seq
           } else if (ev.type === 'user/message') {
@@ -2255,6 +2189,7 @@ var _PREFS_MAX_RETRIES = 8
             _model = null
             _contextWindow = null
             _contextWindowModel = null
+            _windowMismatch = null
             // Re-account the CURRENT session's open-turn ledger from the fresh
             // history. Other sessions' ledgers are left untouched (isolation).
             _openTurnLedger = clearOpenTurns(_openTurnLedger, _sessionId)
@@ -2267,8 +2202,12 @@ var _PREFS_MAX_RETRIES = 8
       }
 
       function _reset() {
+        var hadSubscription = !!_unsubscribe
         if (_unsubscribe) { try { _unsubscribe() } catch (_) {} }
         _unsubscribe = null
+        // A bind was torn down (session switch / start-over): nudge the quick
+        // switch to re-evaluate so it hides until the new session binds.
+        if (hadSubscription && _notifyAutoRetryQuick) { try { _notifyAutoRetryQuick() } catch (_) {} }
         if (_bindRetryTimer) { clearTimeout(_bindRetryTimer); _bindRetryTimer = null }
         _lastUsage = null
         _lastProcessedSeq = -1
@@ -2288,6 +2227,9 @@ var _PREFS_MAX_RETRIES = 8
             console.log('[dsh-flash-ctx-mon] SessionEventTokenSource: binding to session ' + _sessionId + ', ' + entryCount + ' entries in snapshot')
             if (win && win.entries) _processEntries(win.entries, { replay: true })
             _unsubscribe = binding.eventSource.subscribe(_onEventWindowChange)
+            // A session is now bound: nudge the quick-control auto-continue
+            // switch to re-evaluate so it appears the moment binding succeeds.
+            if (_notifyAutoRetryQuick) { try { _notifyAutoRetryQuick() } catch (_) {} }
           } else {
             console.warn('[dsh-flash-ctx-mon] SessionEventTokenSource: no binding/eventSource for session ' + _sessionId
               + ' (binding only exists for an OPEN session)')
@@ -2359,7 +2301,16 @@ var _PREFS_MAX_RETRIES = 8
         if (!_sessions) {
           try { _sessions = ctx && ctx.get ? ctx.get('sessions') : undefined } catch (_) {}
         }
-        if (!_sessions) return
+        if (!_sessions) {
+          // The sessions service is not up yet (it may register a beat after this
+          // source's start). Record the panel-reported id and keep polling so a
+          // late service still binds THIS session instead of dropping the id:
+          // short-circuiting here on `id === _boundSessionId` used to lock the
+          // binding out forever once the first attempt failed.
+          if (!_ctx) _ctx = ctx
+          _scheduleServiceRetry()
+          return
+        }
         console.log('[dsh-flash-ctx-mon] SessionEventTokenSource: bound to injected session ' + id)
         _refreshWorkspaces()
         _reset()
@@ -2373,8 +2324,19 @@ var _PREFS_MAX_RETRIES = 8
        *  bound id). */
       function _tryBindSession(ctx) {
         // Prefer the session fed from the rendered panel; fall back to any
-        // currently-known session id.
-        if (!_sessionId) _sessionId = _findMaterializedSession()
+        // currently-known session id. The injected register is authoritative
+        // even when the panel's setSessionId sprint raced ahead of this source's
+        // start (its effect writes the register unconditionally), so a chip
+        // that mounted before the provider had created the token source still
+        // binds here instead of being lost to a skipped one-shot bind.
+        if (!_sessionId) {
+          if (_injectedSessionId) {
+            _boundSessionId = _injectedSessionId
+            _sessionId = _injectedSessionId
+          } else {
+            _sessionId = _findMaterializedSession()
+          }
+        }
         console.log('[dsh-flash-ctx-mon] SessionEventTokenSource: sessions service found, sessionId=' + (_sessionId || '(none)')
           + (_sessionId ? ' (bound)' : ' — no session open in UI'))
 
@@ -2388,27 +2350,37 @@ var _PREFS_MAX_RETRIES = 8
         }
       }
 
+      /** Re-resolve the sessions service until it becomes available, then bind.
+       *  The service may register a beat after this source's start (the same
+       *  race the skill tracker handles), so instead of a one-shot 3s retry we
+       *  keep polling at a short interval and self-stop the moment the service
+       *  is present — a late-registering host still arms auto-continue instead
+       *  of dropping the session binding forever. Silent (no log spam): we only
+       *  log the success transition, never the intermediate polls. */
+      function _scheduleServiceRetry() {
+        if (_serviceRetryTimer) return   // already polling
+        _serviceRetryTimer = setTimeout(function () {
+          _serviceRetryTimer = null
+          if (_sessions) { _tryBindSession(_ctx); return }
+          try { _sessions = _ctx && _ctx.get ? _ctx.get('sessions') : undefined } catch (_) {}
+          if (_sessions) {
+            console.log('[dsh-flash-ctx-mon] SessionEventTokenSource: sessions service available on retry')
+            _tryBindSession(_ctx)
+          } else {
+            _scheduleServiceRetry()
+          }
+        }, 1000)
+      }
+
       return {
         start: function (ctx) {
-          _ctx = ctx     // stored for preference writes from _persistWindow
+          _ctx = ctx     // service/context handle used for prefs + sessions lookups
           try {
             _sessions = ctx && ctx.get ? ctx.get('sessions') : undefined
           } catch (_) {}
           if (!_sessions) {
             console.warn('[dsh-flash-ctx-mon] SessionEventTokenSource: sessions service not available (will retry)')
-            var retryCtx = ctx
-            setTimeout(function () {
-              if (_sessions) return  // already resolved
-              try {
-                _sessions = retryCtx && retryCtx.get ? retryCtx.get('sessions') : undefined
-              } catch (_) {}
-              if (_sessions) {
-                console.log('[dsh-flash-ctx-mon] SessionEventTokenSource: sessions service available on retry')
-                _tryBindSession(retryCtx)
-              } else {
-                console.warn('[dsh-flash-ctx-mon] SessionEventTokenSource: sessions service still not available after retry')
-              }
-            }, 3000)
+            _scheduleServiceRetry()
             return
           }
 
@@ -2420,12 +2392,43 @@ var _PREFS_MAX_RETRIES = 8
           _retryBySession = Object.create(null)
           _retryRequestIdCache.clear()
           _reset()
+          if (_serviceRetryTimer) { clearTimeout(_serviceRetryTimer); _serviceRetryTimer = null }
+          _bindRetryCount = 0
           if (_listUnsubscribe) { try { _listUnsubscribe() } catch (_) {} }
           _listUnsubscribe = null
           _sessions = null
           _sessionId = null
           _boundSessionId = null
           _ctx = null
+        },
+
+        /** Adopt the current window mismatch: persist the model's authoritative
+         *  request/context window into the llm-pi-ai profile config, and once
+         *  that lands, clear the in-memory mismatch so the alert disappears.
+         *  Resolves true when persisted, false when the host refused. */
+        adoptWindow: function (ctx) {
+          var m = _windowMismatch
+          if (!m) return Promise.resolve(false)
+          return _persistAdopt(ctx, m).then(function (ok) {
+            if (ok && _windowMismatch === m) {
+              // Persisted; from now on the authoritative request window governs
+              // this model (a later request/context re-resolves equally).
+              _contextWindow = m.requestWindow
+              _contextWindowModel = _model
+              _windowMismatch = null
+            }
+            return ok
+          })
+        },
+
+        /** Ignore this model's window-mismatch for the rest of the session. The
+         *  mismatch state itself is left intact (a fresh session must surface
+         *  it again), but poll now suppresses the alert via the ignored set. */
+        ignoreMismatch: function () {
+          var m = _windowMismatch
+          if (!m) return false
+          _mismatchIgnored[m.model] = true
+          return true
         },
 
         /** Returns the current token estimate.
@@ -2476,6 +2479,7 @@ var _PREFS_MAX_RETRIES = 8
               contextWindow: windowValue,
               windowSource: windowSource,
               windowConfirmed: windowConfirmed,
+              windowMismatch: (_windowMismatch && _windowMismatch.model && _mismatchIgnored[_windowMismatch.model]) ? null : _windowMismatch,
               model: _model,
               source: 'precise',
             }
@@ -2497,6 +2501,13 @@ var _PREFS_MAX_RETRIES = 8
            *  to). Null when no session is materialized. Used by the alert provider
            *  to reject a stale continue-offer after a session switch. */
           getSessionId: function () { return _sessionId },
+          /** Whether the token source has BOUND to an open session (a known
+           *  session id AND a live eventSource subscription). The quick-control
+           *  auto-continue switch only appears once this is true, so a user is
+           *  never shown an auto-continue toggle that has nothing to act on
+           *  (e.g. while the sessions service is still registering and no
+           *  session is materialized). */
+          isBound: function () { return !!(_sessionId && _unsubscribe) },
           /** Bind the runner to a specific session id. The rendered panel calls
            *  this with its slot-injected `props.sessionId`; the runner needs a
            *  known id because the host exposes no enumerable session list. */
@@ -2765,7 +2776,11 @@ var _PREFS_MAX_RETRIES = 8
        *  (it does not on this host). */
       function _syncSession() {
         if (!_sessions) return
-        var id = _boundSessionId || findMainViewSessionId(_sessions)
+        // Prefer the id injected from the rendered panel. The injected register
+        // is authoritative even when the panel's bind sprint raced ahead of this
+        // source's start (the chip writes it unconditionally), so a chip mounted
+        // before the tracker existed still binds here instead of being lost.
+        var id = _boundSessionId || _injectedSessionId || findMainViewSessionId(_sessions)
         if (id === _sessionId) return
         _unbind()
         _bindRetryCount = 0
@@ -3052,6 +3067,58 @@ var _PREFS_MAX_RETRIES = 8
             })
           }
         }
+        // ── Window mismatch (warning) ──────────────────────────────────────
+        // When DSH's adapter resolves an authoritative request/context window
+        // for THIS model that disagrees with the user-configured (mapped /
+        // default) window, the configured override wins. That precedence is
+        // intentional, but silence would hide a stale or wrong mapping, so the
+        // disagreement is surfaced as an explicit alert panel. Stable id,
+        // re-emitted every poll while the mismatch holds — the same persistent
+        // condition pattern as the ctx-warning threshold alert above.
+        var mm = tokenEstimate && tokenEstimate.windowMismatch
+        if (mm) {
+          alerts.push({
+            id: 'ctx-window-mismatch',
+            severity: 'warning',
+            title: function () { return t('alertWindowMismatch') },
+            message: function () {
+              return t('alertWindowMismatchDetail')
+                .replace('{model}', mm.model || '?')
+                .replace('{mapped}', formatTokenK(mm.mappingWindow))
+                .replace('{actual}', formatTokenK(mm.requestWindow))
+            },
+            icon: '⚠️',
+            timestamp: mm.at,
+            dismissible: true,
+            // Two user-decided affordances:
+            //   ctx-adopt-window — persist THIS model's request/context window
+            //     into the llm-pi-ai profile config (global, persisted change),
+            //     then clear the in-memory mismatch once the host accepts.
+            //   ctx-ignore-window — silence this model's mismatch for the rest
+            //     of the session (set starts empty, so the first alert still
+            //     appears on a fresh session).
+            actions: [{
+              id: 'ctx-adopt-window',
+              label: function () { return t('alertAdoptWindow') },
+              primary: true,
+              onClick: function () {
+                tokenSource.adoptWindow(_prefCtx).then(function () {
+                  if (timer) { clearTimeout(timer); timer = null }
+                  poll()
+                })
+              },
+            }, {
+              id: 'ctx-ignore-window',
+              label: function () { return t('alertIgnoreMismatch') },
+              primary: false,
+              onClick: function () {
+                tokenSource.ignoreMismatch()
+                if (timer) { clearTimeout(timer); timer = null }
+                poll()
+              },
+            }],
+          })
+        }
         // NOTE: no alert is emitted when the token source is 'unavailable'.
         // "Cannot detect session context length" carries no actionable
         // information — it only fires when there is no data to report, and a
@@ -3120,6 +3187,33 @@ var _PREFS_MAX_RETRIES = 8
             },
             icon: '🔁',
             timestamp: exitedAt,
+            dismissible: true,
+          })
+        }
+
+        // "Turn-ending judgement" info alert (plan A: local rule-based verdict).
+        // The current session's most recent LIVE turn/end queued a judgement;
+        // claim it once and surface it as an info toast. Unique id = the
+        // turn-end wall clock ⇒ a judgement can never be re-toasted after the
+        // registry evicts it (contrast a stable id, which would). Replay stays
+        // silent because _turnVerdictPending is only set on live turn/end.
+        var verdictPending = _turnVerdictPending
+        if (verdictPending && verdictPending.sessionId === (tokenSource && tokenSource.getSessionId ? tokenSource.getSessionId() : null)) {
+          _turnVerdictPending = null
+          var verdictAt = typeof verdictPending.at === 'number' ? verdictPending.at : Date.now()
+          alerts.push({
+            id: 'ctx-turn-verdict-' + verdictAt,
+            severity: 'info',
+            title: function () { return t('turnVerdictTitle') },
+            message: function () {
+              var verdictText = t(verdictPending.verdictKey)
+              if (verdictPending.detail) {
+                return verdictText + t('turnVerdictDetail').replace('{value}', verdictPending.detail)
+              }
+              return verdictText
+            },
+            icon: '🔵',
+            timestamp: verdictAt,
             dismissible: true,
           })
         }
@@ -3384,7 +3478,7 @@ var _PREFS_MAX_RETRIES = 8
         color: 'var(--dsw-alias-label-secondary, #8b949e)',
         fontSize: '12px',
       },
-      // Fold toggles for the config-params and data-source sections — same
+      // Fold toggles for the config-params and auto-retry sections — same
       // style as the alert-preview toggle, one pattern for every collapsible
       // section in the panel. Each sits directly under its own divider, so it
       // deliberately carries no extra top margin.
@@ -3455,32 +3549,6 @@ var _PREFS_MAX_RETRIES = 8
         fontSize: '11px',
         marginBottom: '6px',
         color: 'var(--dsw-alias-label-secondary, #8b949e)',
-      },
-      memLiveDataGrid: {
-        display: 'grid',
-        gridTemplateColumns: 'auto auto',
-        columnGap: '10px',
-        rowGap: '4px',
-        fontSize: '12px',
-      },
-      memLiveDataLabel: {
-        color: 'var(--dsw-alias-label-secondary, #8b949e)',
-      },
-      memLiveDataValue: {
-        color: 'var(--dsw-alias-label-primary, #c9d1d9)',
-        fontWeight: 500,
-      },
-      memUsageBarTrack: {
-        height: '4px',
-        borderRadius: '2px',
-        background: 'rgba(255,255,255,0.08)',
-        overflow: 'hidden',
-        marginTop: '2px',
-      },
-      memUsageBarFill: {
-        height: '100%',
-        borderRadius: '2px',
-        transition: 'width 0.3s ease, background 0.3s ease',
       },
       tabPageChevron: {
         display: 'inline-block',
@@ -3587,286 +3655,6 @@ var _PREFS_MAX_RETRIES = 8
     //#endregion ───────────────────────────────────────────────────────────────
 
     // ═══════════════════════════════════════════════════════════════════════
-    //#region ModelWindowMapEditor ────────────────────────────────────────────
-
-    function ModelWindowMapEditor(props) {
-      var tick = props.tick
-      var setTick = props.setTick
-      var ctx = props.ctx || _prefCtx
-
-      // Catalog fetch state
-      var _catState = useState(_modelCatalog ? 'loaded' : 'idle')
-      var catState = _catState[0], setCatState = _catState[1]
-
-      // Fetch catalog on first mount
-      useEffect(function () {
-        if (_modelCatalog) { setCatState('loaded'); return }
-        setCatState('loading')
-        _fetchModelCatalog(ctx).then(function () {
-          setCatState(_modelCatalog ? 'loaded' : 'error')
-          setTick(function (v) { return v + 1 })
-        })
-      }, [])
-
-      // Build unified model list
-      var models = _allKnownModels()
-
-      // Style constants
-      var badgeStyle = {
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: '3px',
-        fontSize: '10px',
-        padding: '1px 5px',
-        borderRadius: '8px',
-        whiteSpace: 'nowrap',
-        lineHeight: '14px',
-      }
-      var srcBadgeColors = {}
-      srcBadgeColors[CWS_REQUEST_CONTEXT] = { bg: 'rgba(88,166,255,0.15)', color: '#58a6ff' }
-      srcBadgeColors[CWS_CATALOG_AUTO]    = { bg: 'rgba(63,185,80,0.15)',  color: '#3fb950' }
-      srcBadgeColors[CWS_CATALOG_UNKNOWN]  = { bg: 'rgba(63,185,80,0.1)',   color: '#3fb950' }
-      srcBadgeColors[CWS_ERROR_EXTRACTED] = { bg: 'rgba(248,81,73,0.15)',  color: '#f85149' }
-      srcBadgeColors[CWS_USER_MAPPING]    = { bg: 'rgba(210,153,34,0.15)', color: '#d29922' }
-      srcBadgeColors[CWS_BUILTIN_TABLE]   = { bg: 'rgba(139,148,158,0.15)',color: '#8b949e' }
-      srcBadgeColors[CWS_FUZZY_MATCH]     = { bg: 'rgba(139,148,158,0.15)',color: '#8b949e' }
-      srcBadgeColors[CWS_APPROX_DEFAULT]  = { bg: 'rgba(139,148,158,0.1)', color: '#484f58' }
-
-      function renderSourceBadge(sourceTag) {
-        var effective = effectiveSource(sourceTag)
-        var icon = sourceIcon(sourceTag)
-        var label = t(sourceLabelKey(sourceTag))
-        var colors = srcBadgeColors[effective] || srcBadgeColors[CWS_APPROX_DEFAULT]
-        return h('span', {
-          style: Object.assign({}, badgeStyle, {
-            background: colors.bg,
-            color: colors.color,
-          }),
-          title: sourceTag,
-        }, icon, label)
-      }
-
-      function formatWindow(w) {
-        if (w == null) return t('ctxNoWindow')
-        return formatTokenK(w)
-      }
-
-      var rows = models.map(function (entry) {
-        var id = entry.id
-        var name = entry.name
-        var window = entry.window
-        var maxTokens = entry.maxTokens
-        var source = entry.source
-        var provider = entry.provider
-
-        var displayName = name || id
-        var idHint = (name && name !== id) ? id : null
-        var llmRow = _llmModelEntry(id) || null
-
-        var userMap = _alertPref('modelContextWindows')
-        var isInUserMap = userMap && userMap[id] != null
-        var editableRow = isInUserMap || !!llmRow
-        var sources = _alertPref('modelContextWindowSources')
-        var storedSource = (sources && sources[id]) || null
-
-        var effectiveTag = storedSource || source || CWS_APPROX_DEFAULT
-
-        return h('div', {
-          key: id,
-          style: {
-            display: 'flex',
-            alignItems: 'center',
-            gap: '6px',
-            marginBottom: '3px',
-            padding: '2px 0',
-          },
-        },
-          // Source badge
-          renderSourceBadge(effectiveTag),
-          // Model name
-          h('span', {
-            style: {
-              flex: '1',
-              fontSize: '12px',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-              opacity: window != null ? 1 : 0.5,
-            },
-            title: id + (provider ? ' (' + provider + ')' : ''),
-          },
-            displayName,
-            idHint
-              ? h('span', { style: { fontSize: '10px', opacity: 0.5, marginLeft: '4px' } }, idHint)
-              : null,
-          ),
-          // Window value (editable) -> persists into llm-pi-ai model config
-          h('input', {
-            type: 'number',
-            value: window != null ? window : '',
-            placeholder: 'ctxWin',
-            title: 'contextWindow (tokens)',
-            style: {
-              width: '72px',
-              fontSize: '12px',
-              padding: '2px 4px',
-              borderRadius: '4px',
-              border: '1px solid rgba(255,255,255,0.15)',
-              background: 'rgba(255,255,255,0.05)',
-              color: 'inherit',
-              opacity: window != null ? 1 : 0.5,
-            },
-            onChange: function (e) {
-              var raw = e.target.value
-              if (raw === '') { _commitModelField(ctx, id, 'contextWindow', null, setTick); return }
-              var val = Number(raw)
-              if (!isFinite(val) || val <= 0) return
-              _commitModelField(ctx, id, 'contextWindow', val, setTick)
-            },
-          }),
-          // maxTokens value (editable)
-          h('input', {
-            type: 'number',
-            value: maxTokens != null ? maxTokens : '',
-            placeholder: 'mxTok',
-            title: 'maxTokens',
-            style: {
-              width: '64px',
-              fontSize: '12px',
-              padding: '2px 4px',
-              borderRadius: '4px',
-              border: '1px solid rgba(255,255,255,0.15)',
-              background: 'rgba(255,255,255,0.05)',
-              color: 'inherit',
-              opacity: maxTokens != null ? 1 : 0.5,
-            },
-            onChange: function (e) {
-              var raw = e.target.value
-              if (raw === '') { _commitModelField(ctx, id, 'maxTokens', null, setTick); return }
-              var val = Number(raw)
-              if (!isFinite(val) || val <= 0) return
-              _commitModelField(ctx, id, 'maxTokens', val, setTick)
-            },
-          }),
-          // Delete button (clear configured contextWindow / maxTokens)
-          editableRow
-            ? h('button', {
-                type: 'button',
-                style: { background: 'none', border: 'none', color: '#f85149', cursor: 'pointer', fontSize: '14px', padding: '0 2px' },
-                title: 'reset contextWindow and maxTokens',
-                onClick: function () {
-                  _commitModelField(ctx, id, 'contextWindow', null, setTick)
-                  _commitModelField(ctx, id, 'maxTokens', null, setTick)
-                },
-              }, '✕')
-            : h('span', { style: { width: '14px' } }),
-        )
-      })
-
-      // "Add new" row
-      var _newModel = useState('')
-      var newModel = _newModel[0], setNewModel = _newModel[1]
-      var _newWindow = useState('')
-      var newWindow = _newWindow[0], setNewWindow = _newWindow[1]
-      var _newMaxTokens = useState('')
-      var newMaxTokens = _newMaxTokens[0], setNewMaxTokens = _newMaxTokens[1]
-      rows.push(h('div', { key: '_add', style: { display: 'flex', alignItems: 'center', gap: '6px', marginTop: '6px', paddingTop: '4px', borderTop: '1px solid rgba(255,255,255,0.08)' } },
-        h('span', { style: badgeStyle, title: CWS_USER_MAPPING }, sourceIcon(CWS_USER_MAPPING), t('ctxSrcUserMapping')),
-        h('input', {
-          type: 'text',
-          placeholder: 'model-name',
-          value: newModel,
-          style: { flex: '1', fontSize: '12px', padding: '2px 4px', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: 'inherit' },
-          onChange: function (e) { setNewModel(e.target.value) },
-        }),
-        h('input', {
-          type: 'number',
-          placeholder: 'ctxWin',
-          title: 'contextWindow (tokens)',
-          value: newWindow,
-          style: { width: '72px', fontSize: '12px', padding: '2px 4px', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: 'inherit' },
-          onChange: function (e) { setNewWindow(e.target.value) },
-        }),
-        h('input', {
-          type: 'number',
-          placeholder: 'mxTok',
-          title: 'maxTokens',
-          value: newMaxTokens,
-          style: { width: '64px', fontSize: '12px', padding: '2px 4px', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: 'inherit' },
-          onChange: function (e) { setNewMaxTokens(e.target.value) },
-        }),
-        h('button', {
-          type: 'button',
-          style: { background: 'none', border: 'none', color: 'var(--dsw-alias-brand-primary, #58a6ff)', cursor: 'pointer', fontSize: '14px', padding: '0 4px' },
-          onClick: function () {
-            var model = (newModel || '').trim()
-            var windowV = Number(newWindow)
-            var mxV = newMaxTokens.trim() === '' ? null : Number(newMaxTokens)
-            if (!model) return
-            var llmRoot = _llmModelEntry(model)
-            if (llmRoot) {
-              var p = {}
-              if (newWindow.trim() === '') p.contextWindow = null
-              else if (isFinite(windowV) && windowV > 0) p.contextWindow = windowV
-              if (newMaxTokens.trim() === '') p.maxTokens = null
-              else if (mxV !== null && isFinite(mxV) && mxV > 0) p.maxTokens = mxV
-              _writeLlmpiAiModel(ctx, model, p, function () {})
-                .then(function (ok) { if (!ok) _refreshLlmpiAi(ctx); setTick(function (v) { return v + 1 }) })
-            } else if (newWindow.trim() !== '' && isFinite(windowV) && windowV > 0) {
-              var updated = Object.assign({}, _alertPref('modelContextWindows') || {})
-              updated[model] = windowV
-              var updatedSources = Object.assign({}, _alertPref('modelContextWindowSources') || {})
-              updatedSources[model] = CWS_USER_MAPPING
-              savePrefs(ctx, {
-                modelContextWindows: updated,
-                modelContextWindowSources: updatedSources,
-              }, null, function () {})
-              setTick(function (v) { return v + 1 })
-            }
-            setNewModel('')
-            setNewWindow('')
-            setNewMaxTokens('')
-          },
-        }, '+'),
-      ))
-
-      // Catalog status footer
-      var catStatusEl = null
-      if (catState === 'loading') {
-        catStatusEl = h('div', { style: { fontSize: '10px', opacity: 0.4, marginTop: '4px' } }, '📋 ' + t('ctxCatalogLoading'))
-      } else if (catState === 'error' || _modelCatalogError) {
-        // Show WHY: 'no remote.session (...)' / 'rpc <code>: <message>' /
-        // 'threw: ...' mean very different things, and the blanket message is
-        // what made this failure unattributable from the UI.
-        catStatusEl = h('div', { style: { fontSize: '10px', color: '#f85149', marginTop: '4px', display: 'flex', alignItems: 'center', gap: '6px' } },
-          '⚠️ ' + t('ctxCatalogError') + (_modelCatalogError ? ' · ' + _modelCatalogError : ''),
-          h('button', {
-            type: 'button',
-            style: { background: 'none', border: '1px solid rgba(248,81,73,0.3)', color: '#f85149', cursor: 'pointer', fontSize: '10px', padding: '0 4px', borderRadius: '3px' },
-            onClick: function () {
-              _modelCatalog = null
-              _modelCatalogPromise = null
-              _modelCatalogError = null
-              setCatState('loading')
-              _fetchModelCatalog(ctx).then(function () {
-                setCatState(_modelCatalog ? 'loaded' : 'error')
-                setTick(function (v) { return v + 1 })
-              })
-            },
-          }, t('ctxCatalogRefresh')),
-        )
-      }
-
-      if (models.length === 0) {
-        rows.unshift(h('div', { key: '_empty', style: { fontSize: '11px', opacity: 0.4, marginBottom: '4px' } }, '(' + t('ctxModelWindowMap') + ': —)'))
-      }
-
-      return h('div', null, rows, catStatusEl)
-    }
-
-    //#endregion ───────────────────────────────────────────────────────────────
-
-    // ═══════════════════════════════════════════════════════════════════════
     //#region MonitorConfigModal (context only) ──────────────────────────────
 
     var MONITOR_SLIDER_FIELDS = {
@@ -3933,18 +3721,12 @@ var _PREFS_MAX_RETRIES = 8
       var _tick = useState(0)
       var tick = _tick[0], setTick = _tick[1]
 
-      // Model window map fold state (collapsed by default — data-heavy section)
-      var _mapFolded = useState(true)
-      var mapFolded = _mapFolded[0], setMapFolded = _mapFolded[1]
-
-      // Configuration parameters and data source are folded by default, the
-      // same way the alert preview is: the panel is opened far more often to
-      // read this session's skills than to move a slider, so the two reference
-      // sections stay out of the way until asked for.
+      // Configuration parameters and the alert preview are folded by default:
+      // the panel is opened far more often to read this session's skills than
+      // to move a slider, so the reference sections stay out of the way until
+      // asked for.
       var _paramsFolded = useState(true)
       var paramsFolded = _paramsFolded[0], setParamsFolded = _paramsFolded[1]
-      var _dataFolded = useState(true)
-      var dataFolded = _dataFolded[0], setDataFolded = _dataFolded[1]
 
       // Auto-Retry tuning is also a reference section — folded by default.
       var _autoFolded = useState(true)
@@ -4205,135 +3987,6 @@ var _PREFS_MAX_RETRIES = 8
         )
       }
 
-      // ── Context monitor live data section ─────────────────────────────
-      var ctxLiveDataEl = null
-      if (monitor === 'context') {
-        // Read token estimate from the active token source
-        var tokenEstimate = null
-        try {
-          if (_activeTokenSource) {
-            tokenEstimate = _activeTokenSource.getTokenEstimate()
-          }
-        } catch (_) {}
-
-        var ctxInfoRows = []
-        // Data source quality
-        var isPrecise = tokenEstimate && tokenEstimate.source === 'precise'
-        var sourceStr = isPrecise
-          ? t('ctxSourcePrecise')
-          : t('ctxSourceUnavailable')
-        var sourceColor = isPrecise
-          ? 'var(--dsw-alias-brand-primary, #58a6ff)'
-          : '#8b949e'
-        ctxInfoRows.push(
-          h('span', { style: S.memLiveDataLabel }, t('ctxDataSource')),
-          h('span', { style: Object.assign({}, S.memLiveDataValue, { color: sourceColor }) }, sourceStr),
-        )
-
-        // Current model (precise mode only)
-        if (isPrecise && tokenEstimate.model) {
-          ctxInfoRows.push(
-            h('span', { style: S.memLiveDataLabel }, t('ctxCurrentModel')),
-            h('span', { style: S.memLiveDataValue }, tokenEstimate.model),
-          )
-        }
-
-        // Context window size
-        var windowSize = tokenEstimate && tokenEstimate.contextWindow
-          ? tokenEstimate.contextWindow
-          : _alertPref('ctxApproxWindow')
-        ctxInfoRows.push(
-          h('span', { style: S.memLiveDataLabel }, t('ctxWindowTokens')),
-          h('span', { style: S.memLiveDataValue }, formatTokenK(windowSize) + ' tokens'),
-        )
-
-        // Where that window came from — a mapped model and an unmapped one look
-        // identical otherwise, which is exactly how a mapping could appear to be
-        // ignored.
-        ctxInfoRows.push(
-          h('span', { style: S.memLiveDataLabel }, t('ctxWindowSource')),
-          h('span', { style: S.memLiveDataValue }, t(sourceLabelKey(tokenEstimate && tokenEstimate.windowSource))),
-        )
-
-        // Context pressure (precise mode only)
-        if (isPrecise) {
-          var pressure = tokenEstimate.pressureTokens || 0
-          ctxInfoRows.push(
-            h('span', { style: S.memLiveDataLabel }, t('ctxPressureTokens')),
-            h('span', { style: S.memLiveDataValue }, formatTokenK1(pressure)),
-          )
-          // Also show the breakdown: input / cacheRead / cacheWrite
-          ctxInfoRows.push(
-            h('span', { style: S.memLiveDataLabel }, t('ctxInputTokens')),
-            h('span', { style: S.memLiveDataValue }, formatTokenK1(tokenEstimate.inputTokens) + ' / cache ' + formatTokenK1(tokenEstimate.cacheReadTokens || 0) + '+' + formatTokenK1(tokenEstimate.cacheWriteTokens || 0)),
-          )
-        }
-
-        // Context usage bar — only when precise data is available
-        var barEl = null
-        if (isPrecise) {
-          var barPct = windowSize > 0 ? Math.min(Math.round((tokenEstimate.pressureTokens || 0) / windowSize * 100), 100) : 0
-          var barColor = 'var(--dsw-alias-brand-primary, #58a6ff)'
-          var tInfo = _alertPref('ctxThresholdInfo')
-          var tWarn = _alertPref('ctxThresholdWarning')
-          var tErr = _alertPref('ctxThresholdError')
-          if (barPct >= tErr) barColor = '#f85149'
-          else if (barPct >= tWarn) barColor = '#f0883e'
-          else if (barPct >= tInfo) barColor = '#d29922'
-          barEl = h('div', { style: S.memUsageBarTrack },
-            h('div', {
-              style: Object.assign({}, S.memUsageBarFill, {
-                width: barPct + '%',
-                background: barColor,
-              }),
-            })
-          )
-        } else {
-          barEl = h('div', { style: S.memUsageBarTrack },
-            h('div', {
-              style: Object.assign({}, S.memUsageBarFill, {
-                width: '0%',
-                background: '#8b949e',
-              }),
-            })
-          )
-        }
-
-        // Data source — folded by default, same toggle pattern as the params
-        // and alert-preview sections.
-        ctxLiveDataEl = h('div', { key: 'ctx-live-data' },
-          h('div', { style: S.monitorModalDivider }),
-          h('button', {
-            type: 'button',
-            style: S.sectionFoldToggle,
-            onClick: function () { setDataFolded(function (v) { return !v }) },
-          },
-            (dataFolded ? '▸ ' : '▾ ') + t('ctxDataSource'),
-          ),
-          !dataFolded
-            ? h('div', { style: { marginTop: '10px' } },
-              h('div', { style: S.memColumnCard },
-                h('div', { style: S.memLiveDataGrid }, ctxInfoRows),
-                barEl,
-              ),
-              // Model window map editor (collapsible, collapsed by default)
-              h('div', { style: Object.assign({}, S.memColumnCard, { marginTop: '8px' }) },
-                h('span', {
-                  style: Object.assign({}, S.memSubSectionLabel, { cursor: 'pointer', userSelect: 'none' }),
-                  onClick: function () { setMapFolded(!mapFolded) },
-                },
-                  h('span', { style: mapFolded ? S.tabPageChevron : S.tabPageChevronOpen }, '▶'),
-                  ' ' + t('ctxModelWindowMap'),
-                ),
-                !mapFolded
-                  ? h(ModelWindowMapEditor, { tick: tick, setTick: setTick, ctx: _prefCtx })
-                  : null,
-              ),
-            )
-            : null,
-        )
-      }
-
       // ── Skills used in this session (detail section) ───────────────────
       // The alert and the header chip both open THIS modal, so this is the
       // detail page: it carries everything the one-line summaries cannot.
@@ -4365,7 +4018,6 @@ var _PREFS_MAX_RETRIES = 8
             fieldEls,
             autoRetryEl,
             alertPreviewEl,
-            ctxLiveDataEl,
           ),
         ),
       )
@@ -4752,8 +4404,15 @@ var _PREFS_MAX_RETRIES = 8
       // session". Only a session with skills shown here mounts — the runner
       // (and the quick switch's arm/disarm) then always targets an
       // actually-open session.
+      //
+      // The id is written to the module-scope injected register UNCONDITIONALLY
+      // (not only when a live source exists): a chip can mount before the
+      // provider has created the token/skill sources, and with deps `[sessionId]`
+      // this effect never re-runs afterwards. The register is what lets a
+      // later-starting source pick the id up instead of losing it forever.
       useEffect(function () {
         if (!sessionId) return
+        _injectedSessionId = sessionId
         if (_activeTokenSource && typeof _activeTokenSource.setSessionId === 'function') {
           _activeTokenSource.setSessionId(sessionId)
         }
@@ -5065,6 +4724,10 @@ var _PREFS_MAX_RETRIES = 8
         if (_activeTokenSource && typeof _activeTokenSource.getAutoRetryView === 'function') {
           try { _syncAutoRetryDomIndicator(_activeTokenSource.getAutoRetryView()) } catch (_) {}
         }
+        // Watch dsh-flash for trigger-button rebuilds (position switches
+        // unmount + remount the button, dropping our stamped badge & chip);
+        // re-paint with the latest view when that happens.
+        _ensureTriggerRepaintObserver()
 
         // 0c. Wire the watchdog badge into the unsettled view bridge, same
         //     mechanism as 0b. Reminder-only: it paints a red count, never
@@ -5141,6 +4804,14 @@ var _PREFS_MAX_RETRIES = 8
           //     runner's disarmAutoRetry drops the session's armed record, and
           //     re-arming simply calls armAutoRetry again.
           ctx.effect(function () {
+            // Let the token source nudge this switch when a session bind
+            // (or un-bind) transition happens, so it appears/disappears the
+            // moment binding settles instead of waiting on the next unrelated
+            // panel action.
+            _notifyAutoRetryQuick = function () {
+              try { registry.notifyChange(RUNNER_QUICK_KEY) } catch (_) {}
+              try { alertRegistry.notify() } catch (_) {}
+            }
             var dispose = registry.registerSwitch({
               id: RUNNER_QUICK_KEY,
               label: L('autoRetryQuickLabel'),
@@ -5170,7 +4841,16 @@ var _PREFS_MAX_RETRIES = 8
               // No `config`: the ⚙ 配置 button belongs to the 上下文监控 switch
               // only — a bare one-shot auto-continue toggle has nothing to
               // configure.
-              visible: function () { return _getAlertsOn() },
+              // 系统告警主开关 ON 且当前会话已成功绑定（有一个可作用的
+              // eventSource）。绑定成功后 auto-continue 才能真正收/发 offer，
+              // 所以在绑定完成前不显示这个开关，避免展示一个无可作用的 toggle
+              //（当 sessions 服务尚未注册 / 没有打开会话时隐藏）。一旦绑定
+              // 成功（或失败后恢复）panel 会重新评估 visible()。
+              visible: function () {
+                if (!_getAlertsOn()) return false
+                var src = _activeTokenSource
+                return !!(src && typeof src.isBound === 'function' && src.isBound())
+              },
               getValue: function () { return _getRunnerActive() },
               setValue: function (v) {
                 var src = _activeTokenSource
@@ -5189,7 +4869,10 @@ var _PREFS_MAX_RETRIES = 8
                 try { alertRegistry.notify() } catch (_) {}
               },
             })
-            return dispose
+            return function () {
+              _notifyAutoRetryQuick = null
+              try { dispose() } catch (_) {}
+            }
           }, 'dsh-flash-ctx-mon: auto-continue quick switch')
 
           // 5. Apply persisted toggle gates — before the alert registry auto-starts
@@ -5273,6 +4956,7 @@ var _PREFS_MAX_RETRIES = 8
         _autoRetryStore = null
         _clearUnsettledDomIndicator()
         _unsettledStore = null
+        _stopTriggerRepaintObserver()
       },
     }
     return client
