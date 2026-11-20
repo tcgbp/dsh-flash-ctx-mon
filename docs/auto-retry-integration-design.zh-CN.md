@@ -281,6 +281,31 @@ signature 注释、缺字段体；作者复核已裁决「补丁后缀的语义�
 - **可正确承担的唯一插件边界即现状方案 A**：停在 retryable 终态（error / interrupted / max-tokens）且
   仍保留 binding 的**当前会话**。本节据此维持现状、不新增跨会话能力。
 
+### 9.4 落地面：发射前用「绑定 Session 运行态」判定是否确有待续（知识内修订）
+
+以下为**知识内**修订 —— 仅把 §9.3 已实证的边界落成**文档化**判据，不新增能力、不改 `ctx.get('sessions')`
+契约、不改 `Session.prompt` 调用形态（仍是恒 `mode:"queue"` + 稳定 `requestId`，§5 第 7/8 条）。
+
+**判定信号来源**：`sessions.binding(_sessionId)`（0.2.1-rc.5 客户端 `sessions` service 契约）返回的
+`SessionBinding` 上挂有 `session` 字段，即 `Session` 对象；其可读运行态字段（`running`、`openState: OpenState`、
+`pendingSubmissions: readonly PendingSubmission[]`、`awaitingFirstTurn`、`blank`、`removed`、`subagent`、
+`lastAgentError`、`promptError` 等）为客户端 `sessions` service `max` 类型**精确镜像**，可同步读取。
+
+**守卫语义（与 §5 第 9 条疑问句结尾同一模式：跳过本次、保持 armed）**：`_autoContinueEntry` 在发射
+「继续」**之前**读取当前绑定 Session 的运行态 —— 仅当该会话此刻**确实正在运行且有未完成回合**时才补发；
+否则**跳过本次发射、守卫保持 armed 待命**（`_publishAutoRetryView()` 后 return，不 disarm、不消耗连续预算、
+不触发退出告警），避免机械地对已停 / 无未完成回合的会话每轮固定补发「继续」。
+
+**为什么不用 ledger 作主判据**：`unsettledTurnsAt` / `openTurnAgeMs`（`unfinished-turn.js`）描述「已
+`turn/start` 未见 `turn/end`」的未定夺残差，能作为「当前有进行中回合」的**互补**信号；但 auto-continue
+发射点正处于 retryable `turn/end` 之后、该回合刚在 `noteClosedTurn`（FIFO）中关闭的瞬间，此刻 ledger 对该
+会话已无开放残差 —— 若以 ledger 为主判据会把自动继续**永久拦截**。运行态才是主判据，ledger 仅作旁证。
+
+**边界重申（承 §9.1–9.3）**：跨会话不代发。被切走的会话 A 若无 retained generation，`binding(A)` 为
+`undefined`，插件既读不到其事件也发不了 prompt；宿主对每个已启动回合的会话自建 run loop 并自行接完
+（`Session.running` 状态驱动），因此「被切走且正在跑」的会话无需插件代发，硬做反而引入二次计费 / 与宿主
+自接续竞态。
+
 ---
 
 *本文档为纯设计存档，不属于功能改动，不 bump 版本、不写 CHANGELOG。*

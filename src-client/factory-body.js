@@ -1568,6 +1568,40 @@ var _PREFS_MAX_RETRIES = 8
         return null
       }
 
+      /** §9.4 guard: only emit "继续" when the bound session is genuinely
+       *  running with an unfinished turn. Reads the live run state through the
+       *  client sessions service — `binding.session.getSnapshot()` returns the
+       *  max-type mirror `SessionSnapshot` whose `running` / `openState` /
+       *  `pendingSubmissions` / `awaitingFirstTurn` are all readable synchronously.
+       *  Strict mode (user-adjudicated 2026-11-20): running must be true AND one
+       *  of the unfinished-turn signals must hold (pending submission echo present,
+       *  first turn still awaited, or the history window still open). When the run
+       *  state cannot be read at all we conservatively block rather than blindly
+       *  resend a continue — there is no provable unfinished turn to continue.
+       *  Skipping here must NOT disarm: the caller keeps the guard armed so a
+       *  later retryable turn/end resumes auto-continue normally. */
+      function _autoRetryGuardAllowsEmit() {
+        var snap = null
+        try {
+          var binding = _sessions && _sessions.binding && _sessions.binding(_sessionId)
+          if (binding && binding.session && typeof binding.session.getSnapshot === 'function') {
+            snap = binding.session.getSnapshot()
+          } else if (_sessions && _sessions.sessions && _sessions.sessions[_sessionId] && typeof _sessions.sessions[_sessionId].getSnapshot === 'function') {
+            snap = _sessions.sessions[_sessionId].getSnapshot()
+          }
+        } catch (_) { snap = null }
+        if (!snap) {
+          if (_sessions && _sessionId) {
+            console.warn('[dsh-flash-ctx-mon] auto-continue guard: cannot read run state for ' + _sessionId + ' — skipping emission, guard stays armed')
+          }
+          return false
+        }
+        var running = snap.running === true
+        var pending = Array.isArray(snap.pendingSubmissions) && snap.pendingSubmissions.length > 0
+        var unfinished = pending || snap.awaitingFirstTurn === true || snap.openState === 'open'
+        return running && unfinished
+      }
+
       /** Cont-safe one-at-a-time dispatch of the auto-continue. Runs on the
        *  guarded emitter; everything is best-effort and never rethrows. */
       function _autoContinueEntry() {
@@ -1579,6 +1613,14 @@ var _PREFS_MAX_RETRIES = 8
           // Cannot reach a session: silently stand down rather than spin.
           console.warn('[dsh-flash-ctx-mon] auto-continue: no prompt-capable session for ' + _sessionId + ' — disarming')
           _disarmAutoRetry('internal')
+          return
+        }
+        // §9.4 guard: only continue when the bound session is genuinely running
+        // with an unfinished turn. A no-hit skips this emission while keeping the
+        // guard armed — do NOT disarm, do NOT spend the continuation budget, do not
+        // raise an exit alert (a later retryable turn/end resumes auto-continue).
+        if (!_autoRetryGuardAllowsEmit()) {
+          _publishAutoRetryView()
           return
         }
         var now = Date.now()
