@@ -1,5 +1,30 @@
 # 进度日志
 
+## 会话：正常收尾恢复旧守卫（settled 解除已武装会话的自动继续）+ 名字化退出告警
+
+### 需求与决策（Option 2）
+- 上一轮（2026-11-14，见 CHANGELOG 0.2.3）曾把「回合正常收尾不再解除守卫」作为产品决策（settled 退出原因被移除）。
+- 用户本轮（2026-11-20）**恢复旧守卫**（Option 2）：已武装且未暂停的会话，其回合正常收尾（settled，
+  非 error/interrupted/max-tokens 且无「让我 / 让我来 / let me」交接桩）时，解除该会话的自动继续守卫、
+  **暂停其自动继续**，并弹一次 🔁 info 退出告警（zh：『本轮已正常收尾，将暂停本会话的自动继续状态』 /
+  en：'This turn ended normally — auto-continue for this session is now paused'）。
+- 未武装会话的 normal 完成保持未武装（不被动武装）；疑问句结尾仍是「只跳本次补发、守卫保持 armed」的退避（§5.6），不受影响。
+
+### 实现（src-client/factory-body.js）
+- `_handleTurnEnd` settled 分支：`prearmed && prearmed.armed && !prearmed.paused` → `_disarmAutoRetry('settled')`；
+  否则 `_publishAutoRetryView()` 后 return。
+- `AUTO_RETRY_EXIT_REASONS` 恢复为 `['budget', 'prompt-failed', 'settled']`；`autoRetryExitedReasonKey` 恢复
+  settled 分支；`autoRetryExitedReasonSettled` i18n（zh/en）恢复。
+- **名字化定位**：`_noteAutoRetryExit` 用 `_pathBase(_sessionWorkspace(sid))` 折叠 cwd 为工作区基名、
+  `_sessionDisplayTitle(sid)` 解析 `SessionSummary.displayTitle`（持久标题 → 项目基名 → id）做会话名；
+  `autoRetryExitedLocate` 现在收 `(sessionId, workspace, sessionName)` 三参（L360 / L3279）。
+
+### 文档同步
+- CHANGELOG Unreleased 新增恢复条目；README.zh-CN / README 自动继续章节「何时自动关闭/暂停」与退出告警段
+  （「两种」改「三种」、定位信息名字化）；docs/auto-retry-integration-design.zh-CN（状态机表、护栏 5、5b）。
+
+---
+
 ## 会话：修复并发 auto-continue arm 导致的 session-binding 问题（service-retry + isBound 门控开关）
 
 ### 需求与用户确认（Option 2）

@@ -13,6 +13,32 @@ hold the settings namespace and schema.
 
 ## Unreleased
 
+**A normally-settled turn is again a stand-down exit condition (restores the
+pre-0.2.3 guard).** When `turn/end` fires for a turn that is not retryable (not
+`error` / `interrupted` / `max-tokens`, and no "让我 / 让我来 / let me" handoff
+stub) and the session's guard is already armed but not paused, the runner now
+disarms auto-continue for that session — pausing it until the user re-opens it —
+and raises **one** 🔁 info exit-alert naming that the current session paused its
+auto-continue. This reverses the 0.2.3 change: a normally-finished turn is again
+read as the task completing, so the session should stop feeding "继续" on its own.
+An **unarmed** session's normal completion still leaves it unarmed — a plain
+finished turn is never armed passively; the user still opts in with a continue
+word or a retryable failure. A question-ending stays a skip-this-emission backoff
+(guard stays armed, §5.6 — see the question-ending entry below).
+
+Internal:
+- `_handleTurnEnd`'s settled branch: `prearmed && prearmed.armed && !prearmed.paused`
+  → `_disarmAutoRetry('settled')`; otherwise `_publishAutoRetryView()` and return.
+  Retryable → `_armAutoRetry()`, question-ending keeps the armed guard, unchanged.
+- `AUTO_RETRY_EXIT_REASONS` is `['budget', 'prompt-failed', 'settled']` again;
+  `autoRetryExitedReasonKey`'s `settled` branch and the
+  `autoRetryExitedReasonSettled` i18n keys are restored in zh and en.
+- The exit alert is now **name-friendly**: instead of the raw session id it also
+  reports the workspace basename (`_pathBase` collapses `cwd` to its last segment,
+  handling `/` and `\`) and the session display title (`_sessionDisplayTitle`
+  resolves `SessionSummary.displayTitle`: durable title → project basename → id).
+  `autoRetryExitedLocate` now takes `(sessionId, workspace, sessionName)`.
+
 **The context window is resolved read-time and the Model Window Map editor is
 removed.** The panel no longer keeps a user-editable model→window map, and the
 two durable mapping fields (`modelContextWindows` /

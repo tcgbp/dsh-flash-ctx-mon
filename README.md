@@ -205,11 +205,13 @@ The guard is released in two tiers: **fully off (disarmed)** and **paused for hu
 auto "continue" self-echo leaves the guard **armed** and does not consume the consecutive budget;
 the next retryable `turn/end` auto-continues as usual.
 
-**A normally-settled turn no longer stands the guard down either** — when `turn/end` fires for a
-reason that is neither `error` / `interrupted` / `max-tokens`, and the final assistant output does
-not open with "让我 / 让我来 / let me" (no handoff stub), the turn has actually finished, so there
-is nothing more to auto-send — the guard simply **stays armed and keeps waiting**. Because the work
-is already done, this does not spin up an endless loop: the consecutive budget below still pauses
+**A normally-settled turn stands the guard down again** — when `turn/end` fires for a reason that
+is neither `error` / `interrupted` / `max-tokens`, and the final assistant output does not open with
+"让我 / 让我来 / let me" (no handoff stub), the turn has actually finished, so there is nothing more
+to auto-send — an already-**armed** session that isn't paused is **disarmed and its auto-continue
+paused**, with a single 🔁 exit-alert saying the current session paused its auto-continue. You
+re-open it later with a continue word, the switch, or the ↻ re-arm chip. Because a finished turn no
+longer feeds "继续" on its own, this cannot silently spin: the consecutive budget below still pauses
 it, and your **manual stop** still disarms it. An **unarmed** session that settles normally stays
 unarmed (it is never armed passively) — the type-a-continue-word entry point remains for when you
 want it.
@@ -248,13 +250,14 @@ Note: while armed but inside the **cooldown window** (`autoRetryCooldownMs`) or 
 scheduled** (counting down grace/backoff), the guard simply stays armed and idle — that is
 not a turn-off.
 
-Two stand-downs happen with **no user action**, so each surfaces a single 🔁 `info` alert naming
-the reason and appending **location info** `(session <session-id>, workspace <cwd>)` — plus the
-host's rejection detail for a failed prompt: **consecutive-budget exhaustion** (→ `paused`, parked
-waiting for you) and a **host-rejected auto-continue prompt** (→ fully off, so you stop the silent
-"turned green but no 继续" situation). Pressing **"Stop auto-continue"** is your own explicit
-action and is self-evident, so that manual stop does **not** toast — the disarm itself still works
-exactly as before.
+Three stand-downs happen with **no user action**, so each surfaces a single 🔁 `info` alert naming
+the reason and appending readable **location info** (display name/title + session id, workspace
+basename) — plus the host's rejection detail for a failed prompt: a **normally-settled turn**
+(→ disarms the already-armed session and pauses its auto-continue), **consecutive-budget
+exhaustion** (→ `paused`, parked waiting for you) and a **host-rejected auto-continue prompt**
+(→ fully off, so you stop the silent "turned green but no 继续" situation). Pressing
+**"Stop auto-continue"** is your own explicit action and is self-evident, so that manual stop does
+**not** toast — the disarm itself still works exactly as before.
 
 ## Settings
 

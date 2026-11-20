@@ -166,6 +166,7 @@ window.__ModuleLoader__.load({
       alertAutoRetryExited: '已退出自动继续',
       autoRetryExitedReasonBudget: '已连续自动继续达到上限，暂停等待人工输入',
       autoRetryExitedReasonPromptFailed: '自动补发「继续」失败，已停止自动继续',
+      autoRetryExitedReasonSettled: '本轮已正常收尾，将暂停本会话的自动继续状态',
       // Location suffix appended to the exited-alert so the user can locate the
       // workspace + session that just left auto-continue.
       autoRetryExitedLocSid: '会话 {value}',
@@ -275,6 +276,7 @@ window.__ModuleLoader__.load({
       alertAutoRetryExited: 'Auto-continue turned off',
       autoRetryExitedReasonBudget: 'Reached the auto-continue limit — paused for your input',
       autoRetryExitedReasonPromptFailed: 'Auto-continue was rejected — stopped sending "继续"',
+      autoRetryExitedReasonSettled: 'This turn ended normally — auto-continue for this session is now paused',
       // Location suffix appended to the exited-alert so the user can locate the
       // workspace + session that just left auto-continue.
       autoRetryExitedLocSid: 'session {value}',
@@ -334,24 +336,31 @@ window.__ModuleLoader__.load({
       return locale[key] !== undefined ? locale[key] : (LOCALES.en[key] !== undefined ? LOCALES.en[key] : key)
     }
 
-    /** Map an auto-continue exit reason to its i18n key. Normal turn completion
-     *  is no longer an exit (see _handleTurnEnd), and a manual stop no longer
-     *  alerts (see AUTO_RETRY_EXIT_REASONS). Only the reasons that survive the
-     *  gating in _noteAutoRetryExit are surfaced — consecutive-budget exhaustion
-     *  and a host-rejected auto-continue prompt. */
+    /** Map an auto-continue exit reason to its i18n key. A manual stop never
+     *  alerts (see AUTO_RETRY_EXIT_REASONS), and only reasons that survive the
+     *  gating in _noteAutoRetryExit are surfaced — consecutive-budget exhaustion,
+     *  a host-rejected auto-continue prompt, and a normal settled turn (which,
+     *  per the restored product decision in _handleTurnEnd, pauses the current
+     *  session's auto-continue). */
     function autoRetryExitedReasonKey(reason) {
-      return reason === 'prompt-failed' ? 'autoRetryExitedReasonPromptFailed' : 'autoRetryExitedReasonBudget'
+      if (reason === 'prompt-failed') return 'autoRetryExitedReasonPromptFailed'
+      if (reason === 'settled') return 'autoRetryExitedReasonSettled'
+      return 'autoRetryExitedReasonBudget'
     }
 
     /** Build the location suffix for the "exited auto-continue" alert so the
      *  user can locate the workspace + session that just left auto-continue.
-     *  Only renders the context that is actually resolvable — the session id is
-     *  always present (the alert only fires for the current session), and the
-     *  workspace path is included when the session list reports one. Returns an
-     *  empty string when neither is available (defensive; should not happen). */
-    function autoRetryExitedLocate(sessionId, workspace) {
+     *  Displays human-friendly NAMES rather than raw ids: `sessionName` is the
+     *  session's displayTitle (durable title / project basename / session id),
+     *  and `workspace` is the cwd basename. Only renders the context that is
+     *  actually resolvable — the id fallback is always present (the alert only
+     *  fires for the current session), and the workspace is included when the
+     *  session list reports a cwd. Returns an empty string when neither is
+     *  available (defensive; should not happen). */
+    function autoRetryExitedLocate(sessionId, workspace, sessionName) {
       var bits = []
-      if (sessionId != null && sessionId !== '') bits.push(t('autoRetryExitedLocSid').replace('{value}', String(sessionId)))
+      var sidShown = (typeof sessionName === 'string' && sessionName) ? sessionName : sessionId
+      if (sidShown != null && sidShown !== '') bits.push(t('autoRetryExitedLocSid').replace('{value}', String(sidShown)))
       if (workspace) bits.push(t('autoRetryExitedLocWs').replace('{value}', workspace))
       if (!bits.length) return ''
       return t('autoRetryExitedLocOpen') + bits.join(t('autoRetryExitedLocSep')) + t('autoRetryExitedLocClose')
@@ -1135,12 +1144,14 @@ var _PREFS_MAX_RETRIES = 8
     /** Exit reasons that warrant a user-facing info alert. Anything else
      *  (internal stand-downs — no session; a manual "stop" which is an obvious
      *  user-initiated action) carries no informative value and stays silent. A
-     *  normal turn completion no longer ends the guard, so it is not an alert
-     *  reason either. Two reasons remain: consecutive-budget exhaustion, and a
-     *  host-rejected auto-continue prompt — both leave auto-continue without
-     *  any (budget) or any visible (rejection) user action, so a toast naming
-     *  the cause is genuinely useful. */
-    var AUTO_RETRY_EXIT_REASONS = ['budget', 'prompt-failed']
+     *  normal settled turn is, per the restored product decision in
+     *  _handleTurnEnd, a real stand-down exit that pauses the session's
+     *  auto-continue — so it alerts. Three reasons remain: consecutive-budget
+     *  exhaustion, a host-rejected auto-continue prompt, and a normal settled
+     *  completion — the first two leave auto-continue without the user acting
+     *  and the last visibly pauses this session, so a toast naming the cause is
+     *  genuinely useful. */
+    var AUTO_RETRY_EXIT_REASONS = ['budget', 'prompt-failed', 'settled']
 
     // ─────────────────────────────────────────────────────────────────────────
     // "Turn-ending judgement" info alert (session-event → provider channel).
@@ -1368,6 +1379,34 @@ var _PREFS_MAX_RETRIES = 8
         return (typeof cwd === 'string' && cwd) ? cwd : null
       }
 
+      /** Human-friendly basename of a filesystem path (handles both `/` and
+       *  `\` separators, so Windows cwd paths collapse to their last segment).
+       *  Used to name the workspace in the "exited auto-continue" alert. */
+      function _pathBase(p) {
+        if (typeof p !== 'string' || !p) return p
+        var parts = p.split(/[\\/]+/)
+        for (var i = parts.length - 1; i >= 0; i--) {
+          if (parts[i]) return parts[i]
+        }
+        return p
+      }
+
+      /** Human-friendly display name for a session id, resolved from the
+       *  sessions controller's `SessionSummary.displayTitle` (durable title →
+       *  project basename → session id). Returns null when the session list is
+       *  not yet available or the summary has no usable title; callers then
+       *  fall back to the raw session id. */
+      function _sessionDisplayTitle(sessionId) {
+        if (!sessionId) return null
+        try {
+          var snap = _sessions && _sessions.list && typeof _sessions.list.getSnapshot === 'function' ? _sessions.list.getSnapshot() : null
+          var row = snap && snap.byId ? snap.byId[sessionId] : null
+          if (row && typeof row.displayTitle === 'string' && row.displayTitle) return row.displayTitle
+          if (row && typeof row.title === 'string' && row.title) return row.title
+        } catch (_) {}
+        return null
+      }
+
       /** Record that the bound session just left active auto-continue, so the
        *  alert provider can surface ONE info toast naming the reason. Only the
        *  reasons in AUTO_RETRY_EXIT_REASONS alert (budget exhaustion — paused
@@ -1386,7 +1425,8 @@ var _PREFS_MAX_RETRIES = 8
           sessionId: sid,
           reason: reason,
           at: now,
-          workspace: _sessionWorkspace(sid),
+          workspace: _pathBase(_sessionWorkspace(sid)),
+          sessionName: _sessionDisplayTitle(sid),
         }
       }
 
@@ -1674,13 +1714,16 @@ var _PREFS_MAX_RETRIES = 8
       /** turn/end hook: a retryable end (error / interrupted / max-tokens, or a
        *  handoff-stub tail "让我 / 让我来 / let me …" with nothing after it,
        *  §5.1 + handoff-stub fallback) arms the guard and schedules a continue.
-       *  Product decision (2026-11-14): a NORMAL completion is no longer a
-       *  stand-down exit condition. If the guard is ALREADY armed, a settled
-       *  turn keeps it armed and simply schedules the next continue (only the
-       *  consecutive budget — frozen to paused — or a manual stop ends it). An
-       *  UNARMED session's normal completion stays unarmed: it is never
-       *  passively armed by a plain finished turn (the user still opts in by
-       *  typing a continue word, or by a retryable failure). */
+       *  Product decision (restored 2026-11-20, reversing 2026-11-14): a NORMAL
+       *  settled completion IS again a stand-down exit condition. If the guard
+       *  is already armed (and not frozen) the settled turn disarms it, so the
+       *  session's auto-continue pauses until the user re-opens it, and an exit
+       *  alert names that the current session paused its auto-continue. An
+       *  UNARMED session's normal completion stays unarmed: a plain finished
+       *  turn is never passively armed (the user still opts in by typing a
+       *  continue word, or by a retryable failure). A question-ending (the model
+       *  asked something) keeps the guard armed and only skips this turn's
+       *  auto-continue while it waits for the user's answer (§5.6). */
       function _handleTurnEnd(reason) {
         try {
           var turnRetryable = isRetryableEnd(reason) || isHandoffStub(_lastAssistantText)
@@ -1689,14 +1732,25 @@ var _PREFS_MAX_RETRIES = 8
           // and wait for their feedback; the guard stays armed so a later
           // turn/end resumes auto-continue normally (§5.6 "question ending").
           var mustWaitForAnswer = textHasQuestionMark(_lastAssistantText)
-          if (!turnRetryable) {
-            // Normal completion. Keep going only if the guard is already armed
-            // (and not frozen); otherwise leave the unarmed session alone. A
-            // question-ending is covered by the shared gate below.
-            var prearmed = _activeAutoRetryRecord()
-            if (!prearmed || !prearmed.armed || prearmed.paused) return
-          } else {
+          if (turnRetryable) {
             _armAutoRetry()
+          } else if (mustWaitForAnswer) {
+            // Question ending: keep the guard armed and let the shared gate
+            // below skip the emission this turn (frozen budgets stay frozen).
+            var qrec = _activeAutoRetryRecord()
+            if (!qrec || !qrec.armed) return
+          } else {
+            // Normal settled completion (no question): stand the guard down.
+            // A settled turn pauses this session's auto-continue until the user
+            // re-opens it; an armed guard is disarmed here, alerting once with
+            // the reason. Never passively arms an unarmed session.
+            var prearmed = _activeAutoRetryRecord()
+            if (prearmed && prearmed.armed && !prearmed.paused) {
+              _disarmAutoRetry('settled')
+            } else {
+              _publishAutoRetryView()
+            }
+            return
           }
           var rec = _activeAutoRetryRecord()
           if (!rec || !rec.armed || rec.paused) return
@@ -3222,7 +3276,7 @@ var _PREFS_MAX_RETRIES = 8
             title: function () { return t('alertAutoRetryExited') },
             message: function () {
               var reasonText = t(autoRetryExitedReasonKey(exitedPending.reason))
-              var locate = autoRetryExitedLocate(exitedPending.sessionId, exitedPending.workspace)
+              var locate = autoRetryExitedLocate(exitedPending.sessionId, exitedPending.workspace, exitedPending.sessionName)
               var detail = exitedPending.detail ? (' · ' + exitedPending.detail) : ''
               return locate ? reasonText + locate + detail : reasonText + detail
             },
